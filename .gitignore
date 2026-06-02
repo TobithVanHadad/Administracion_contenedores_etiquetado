@@ -1,0 +1,10 @@
+.next
+node_modules
+backups
+logs
+.env.local
+data/orders.json
+data/uploads
+data/*.sqlite
+data/*.sqlite-*
+*.log
