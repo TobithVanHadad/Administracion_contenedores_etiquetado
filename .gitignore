@@ -11,3 +11,4 @@ data/*.sqlite-*
 
 respaldo/
 respaldo_sqlite/
+*.tsbuildinfo
