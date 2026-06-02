@@ -8,3 +8,6 @@ data/uploads
 data/*.sqlite
 data/*.sqlite-*
 *.log
+
+respaldo/
+respaldo_sqlite/
