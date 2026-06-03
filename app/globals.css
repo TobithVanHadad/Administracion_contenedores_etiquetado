@@ -1161,6 +1161,48 @@ tr:last-child td {
   position: absolute;
 }
 
+.upload-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: -6px 0 10px;
+}
+
+.upload-feedback {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+}
+
+.upload-feedback.neutral {
+  background: #eef6fb;
+  border-color: #c9e3f3;
+  color: #0f4f70;
+}
+
+.upload-feedback.success {
+  background: #edf8ef;
+  border-color: #bfe7c8;
+  color: #17652f;
+}
+
+.upload-feedback.warning {
+  background: #fff7e6;
+  border-color: #f4d48b;
+  color: #805600;
+}
+
+.upload-feedback.error {
+  background: #fff0f0;
+  border-color: #f1b5b5;
+  color: #9b1c1c;
+}
+
 .file-list {
   display: grid;
   gap: 10px;

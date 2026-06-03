@@ -220,6 +220,11 @@ type UploadFilesResponse = {
   rejected?: Array<{ name: string; reason: string }>;
 };
 
+type UploadFeedback = {
+  message: string;
+  tone: "neutral" | "success" | "warning" | "error";
+};
+
 const defaultImportMeta: ImportMeta = {
   code: "",
   customer: "",
@@ -527,6 +532,12 @@ function compareLinesBySort(a: OrderLine, b: OrderLine, sortMode: LineSort) {
   return 0;
 }
 
+function summarizeRejectedFiles(rejected: Array<{ name: string; reason: string }> = []) {
+  const names = rejected.slice(0, 3).map((file) => file.name).join(", ");
+  if (!names) return "";
+  return rejected.length > 3 ? `${names} y ${rejected.length - 3} mas` : names;
+}
+
 export default function Home() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -547,6 +558,7 @@ export default function Home() {
   const [importMessage, setImportMessage] = useState("");
   const [replaceExistingOrder, setReplaceExistingOrder] = useState(true);
   const [fileDraft, setFileDraft] = useState<FileDraft>(defaultFileDraft);
+  const [fileUploadFeedback, setFileUploadFeedback] = useState<Record<string, UploadFeedback>>({});
   const [hiddenColumnsByOrder, setHiddenColumnsByOrder] = useState<Record<string, string[]>>({});
   const [orderSort, setOrderSort] = useState<OrderSort>("priority");
   const [userFilter, setUserFilter] = useState("");
@@ -894,15 +906,39 @@ export default function Home() {
   }
 
   async function uploadFiles(orderId: string, files: FileList | null) {
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0) {
+      setFileUploadFeedback((current) => ({
+        ...current,
+        [orderId]: { message: "No se seleccionaron archivos.", tone: "warning" }
+      }));
+      return;
+    }
+
+    const selectedFiles = Array.from(files);
+    const order = orders.find((item) => item.id === orderId);
+    const matchedByName = order
+      ? selectedFiles.filter((file) =>
+          order.lines.some((line) => line.sku && normalizeText(file.name).includes(normalizeText(line.sku)))
+        ).length
+      : 0;
 
     const formData = new FormData();
     formData.append("orderId", orderId);
     formData.append("user", currentUser || "Operaciones");
     formData.append("pin", currentPin);
-    Array.from(files).forEach((file) => formData.append("files", file));
+    selectedFiles.forEach((file) => formData.append("files", file));
 
     setSyncMessage("Subiendo archivos...");
+    setFileUploadFeedback((current) => ({
+      ...current,
+      [orderId]: {
+        message:
+          matchedByName === 0
+            ? "Subiendo archivos. No detecte SKU en el nombre; si no coincide con el pedido, se descartara."
+            : `Subiendo ${selectedFiles.length} archivo(s). Detecte ${matchedByName} posible(s) coincidencia(s) por SKU.`,
+        tone: matchedByName === 0 ? "warning" : "neutral"
+      }
+    }));
 
     try {
       const response = await fetch("/api/files", {
@@ -917,15 +953,35 @@ export default function Home() {
 
       const uploadedCount = data.uploaded?.length ?? 0;
       const rejectedCount = data.rejected?.length ?? 0;
+      const rejectedSummary = summarizeRejectedFiles(data.rejected ?? []);
+      let nextMessage = "";
+      let nextTone: UploadFeedback["tone"] = "neutral";
+
       if (uploadedCount > 0 && rejectedCount > 0) {
-        setSyncMessage(`${uploadedCount} archivo(s) ligados; ${rejectedCount} descartado(s) sin SKU`);
+        nextMessage = `${uploadedCount} archivo(s) ligados. ${rejectedCount} descartado(s) sin SKU coincidente${rejectedSummary ? `: ${rejectedSummary}` : "."}`;
+        nextTone = "warning";
       } else if (uploadedCount > 0) {
-        setSyncMessage(`${uploadedCount} archivo(s) ligados al pedido`);
+        nextMessage = `${uploadedCount} archivo(s) ligados correctamente al pedido.`;
+        nextTone = "success";
       } else {
-        setSyncMessage(`${rejectedCount} archivo(s) descartado(s): sin coincidencia de SKU`);
+        nextMessage = `No se subio nada. ${rejectedCount} archivo(s) descartado(s) porque no tienen SKU coincidente en este pedido${
+          rejectedSummary ? `: ${rejectedSummary}` : "."
+        }`;
+        nextTone = "error";
       }
+
+      setSyncMessage(nextMessage);
+      setFileUploadFeedback((current) => ({
+        ...current,
+        [orderId]: { message: nextMessage, tone: nextTone }
+      }));
     } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : "No se pudieron subir archivos.");
+      const message = error instanceof Error ? error.message : "No se pudieron subir archivos.";
+      setSyncMessage(message);
+      setFileUploadFeedback((current) => ({
+        ...current,
+        [orderId]: { message, tone: "error" }
+      }));
     }
   }
 
@@ -1238,6 +1294,7 @@ export default function Home() {
               changeDispatchDate={changeDispatchDate}
               closeOrder={closeOrder}
               fileDraft={fileDraft}
+              fileUploadFeedback={fileUploadFeedback[selectedOrder.id]}
               hiddenColumns={hiddenColumnsByOrder[selectedOrder.id] ?? []}
               addLine={addLine}
               deleteLine={deleteLine}
@@ -1369,6 +1426,7 @@ function OrderDetail({
   closeOrder,
   uploadFiles,
   fileDraft,
+  fileUploadFeedback,
   setFileDraft,
   addFile,
   deleteFile,
@@ -1393,6 +1451,7 @@ function OrderDetail({
   closeOrder: (orderId: string) => void;
   uploadFiles: (orderId: string, files: FileList | null) => void;
   fileDraft: FileDraft;
+  fileUploadFeedback?: UploadFeedback;
   setFileDraft: (draft: FileDraft) => void;
   addFile: (orderId: string) => void;
   deleteFile: (orderId: string, fileId: string) => void;
@@ -2173,6 +2232,12 @@ function OrderDetail({
                 type="file"
               />
             </label>
+            <p className="upload-help">El nombre del archivo debe incluir el SKU del pedido. Si no hay coincidencia, se descarta automaticamente.</p>
+            {fileUploadFeedback && (
+              <div className={`upload-feedback ${fileUploadFeedback.tone}`} aria-live="polite">
+                {fileUploadFeedback.message}
+              </div>
+            )}
             <div className="file-form">
               <select value={fileDraft.type} onChange={(event) => setFileDraft({ ...fileDraft, type: event.target.value as FileType })}>
                 {Object.entries(fileTypeLabels).map(([value, label]) => (
