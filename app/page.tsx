@@ -9,6 +9,8 @@ import {
   ChevronRight,
   ClipboardList,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   FilePlus2,
   FolderOpen,
@@ -1853,10 +1855,16 @@ function OrderDetail({
             </div>
             <div className="column-toggles">
               {allColumns.map((column) => (
-                <label className="column-toggle" key={column}>
-                  <input checked={!hiddenColumns.includes(column)} onChange={() => toggleColumn(order.id, column)} type="checkbox" />
-                  {column}
-                </label>
+                <button
+                  className={`column-toggle ${hiddenColumns.includes(column) ? "hidden" : ""}`}
+                  key={column}
+                  onClick={() => toggleColumn(order.id, column)}
+                  title={hiddenColumns.includes(column) ? `Mostrar ${column}` : `Ocultar ${column}`}
+                  type="button"
+                >
+                  {hiddenColumns.includes(column) ? <EyeOff size={14} /> : <Eye size={14} />}
+                  <span>{column}</span>
+                </button>
               ))}
             </div>
           </div>
@@ -1890,7 +1898,18 @@ function OrderDetail({
                   <th>Multiplicacion sugerida</th>
                   {visibleColumns.map((column) => (
                     <th className={isDescriptionColumn(column) ? "description-header" : undefined} key={column} title={column}>
-                      {column}
+                      <div className="column-heading">
+                        <span>{column}</span>
+                        <button
+                          aria-label={`Ocultar columna ${column}`}
+                          className="column-eye-button"
+                          onClick={() => toggleColumn(order.id, column)}
+                          title={`Ocultar ${column}`}
+                          type="button"
+                        >
+                          <EyeOff size={14} />
+                        </button>
+                      </div>
                     </th>
                   ))}
                   <th>Archivos</th>

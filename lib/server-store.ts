@@ -365,6 +365,18 @@ export async function resetOrders(auth: AuthPayload) {
   return withWrite(() => replaceOrders(sampleOrders.map(normalizeOrder)));
 }
 
+export async function replaceAllOrders(orders: Order[], auth: AuthPayload) {
+  const user = await authenticate(auth, "reset");
+  const normalizedOrders = orders.map((order) =>
+    normalizeOrder({
+      ...order,
+      history: [buildEvent("migracion", `Pedido migrado a nube por ${user.name}.`, user.name), ...(order.history ?? [])]
+    })
+  );
+
+  return withWrite(() => replaceOrders(normalizedOrders));
+}
+
 export async function createOrder(order: Order, auth: AuthPayload) {
   const user = await authenticate(auth, "create");
   return withWrite(() => {

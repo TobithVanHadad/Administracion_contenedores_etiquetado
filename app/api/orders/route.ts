@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createOrder, patchOrder, readOrders, readUsersPublic, resetOrders } from "@/lib/server-store";
+import { createOrder, patchOrder, readOrders, readUsersPublic, replaceAllOrders, resetOrders } from "@/lib/server-store";
 
 export const runtime = "nodejs";
 
@@ -15,6 +15,11 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "reset") {
       const orders = await resetOrders(body);
+      return NextResponse.json({ orders });
+    }
+
+    if (body.action === "replaceAll") {
+      const orders = await replaceAllOrders(Array.isArray(body.orders) ? body.orders : [], body);
       return NextResponse.json({ orders });
     }
 
