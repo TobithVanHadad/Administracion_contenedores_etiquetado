@@ -214,6 +214,11 @@ function saveOrder(order: Order) {
     );
 }
 
+function readOrdersFromDatabase(database: DatabaseSync) {
+  const rows = database.prepare("SELECT data FROM orders ORDER BY archived ASC, dispatch_date ASC, code ASC").all() as Array<{ data: string }>;
+  return rows.map(rowToOrder);
+}
+
 function normalizeFileKey(value?: string) {
   return String(value ?? "")
     .trim()
@@ -224,6 +229,72 @@ function normalizeFileKey(value?: string) {
 function labelSizeFromCode(code?: string) {
   const normalized = String(code ?? "").toUpperCase();
   return labelSizeCatalog[normalized] ?? "";
+}
+
+function resourceIdentity(file: LinkedFile) {
+  if (file.sourceOrderId || file.sourceFileId) {
+    return [
+      file.sourceOrderId || "",
+      file.sourceFileId || file.id,
+      file.sku || "",
+      file.type,
+      file.labelSizeCode || "",
+      normalizeFileKey(file.originalName || file.name)
+    ].join("|");
+  }
+
+  return [
+    file.id,
+    file.url,
+    file.sku || "",
+    file.type,
+    file.labelSizeCode || "",
+    normalizeFileKey(file.originalName || file.name)
+  ].join("|");
+}
+
+function cloneResourceFile(file: LinkedFile, sourceOrder: Order, targetOrder: Order): LinkedFile | undefined {
+  if (!file.sku) return undefined;
+  const line = targetOrder.lines.find((candidate) => candidate.sku === file.sku);
+  if (!line) return undefined;
+
+  const id = uid("file");
+  return {
+    ...file,
+    id,
+    url: file.storedName ? `/api/files?fileId=${encodeURIComponent(id)}` : file.url,
+    lineId: line.id,
+    sourceFileId: file.sourceFileId || file.id,
+    sourceOrderId: file.sourceOrderId || sourceOrder.id,
+    sourceOrderCode: file.sourceOrderCode || sourceOrder.code,
+    storageStatus: "temporal",
+    addedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function findReusableFiles(targetOrder: Order, orders: Order[]) {
+  const existingKeys = new Set(targetOrder.files.map(resourceIdentity));
+  const sourceSkus = new Set(targetOrder.lines.map((line) => line.sku).filter(Boolean));
+  const reusableFiles: LinkedFile[] = [];
+
+  for (const sourceOrder of orders) {
+    if (sourceOrder.id === targetOrder.id) continue;
+
+    for (const file of sourceOrder.files) {
+      if (!file.sku || !sourceSkus.has(file.sku)) continue;
+      const clonedFile = cloneResourceFile(file, sourceOrder, targetOrder);
+      if (!clonedFile) continue;
+
+      const key = resourceIdentity(clonedFile);
+      if (existingKeys.has(key)) continue;
+
+      existingKeys.add(key);
+      reusableFiles.push(clonedFile);
+    }
+  }
+
+  return reusableFiles;
 }
 
 function fileMatchesReplacement(existing: LinkedFile, incoming: LinkedFile) {
@@ -252,7 +323,13 @@ function can(role: UserRole, action: string, field?: keyof Order) {
     return isPlanning || role === "etiquetado" || role === "aprobador";
   }
 
-  if (action === "addFiles" || action === "updateFileSku" || action === "updateFileMeta" || action === "deleteFile") {
+  if (
+    action === "addFiles" ||
+    action === "updateFileSku" ||
+    action === "updateFileMeta" ||
+    action === "linkExistingResources" ||
+    action === "deleteFile"
+  ) {
     return isPlanning || role === "etiquetado" || role === "aprobador";
   }
 
@@ -379,8 +456,7 @@ export async function readUsersPublic() {
 
 export async function readOrders() {
   const database = await openDb();
-  const rows = database.prepare("SELECT data FROM orders ORDER BY archived ASC, dispatch_date ASC, code ASC").all() as Array<{ data: string }>;
-  return rows.map(rowToOrder);
+  return readOrdersFromDatabase(database);
 }
 
 async function withWrite(mutator: () => Promise<void> | void) {
@@ -418,15 +494,30 @@ export async function replaceAllOrders(orders: Order[], auth: AuthPayload) {
 export async function createOrder(order: Order, auth: AuthPayload) {
   const user = await authenticate(auth, "create");
   return withWrite(() => {
-    const normalized = normalizeOrder({
+    const database = db;
+    const existingOrders = database ? readOrdersFromDatabase(database) : [];
+    const baseOrder = normalizeOrder({
       ...order,
       createdAt: order.createdAt || new Date().toISOString(),
       files: order.files.map((file) => ({
         ...file,
         storageStatus: file.storageStatus ?? "temporal",
         addedAt: file.addedAt ?? new Date().toISOString()
-      })),
-      history: [buildEvent("importacion", `Pedido creado con ${order.lines.length} lineas.`, user.name), ...order.history]
+      }))
+    });
+    const reusableFiles = findReusableFiles(baseOrder, existingOrders);
+    const normalized = normalizeOrder({
+      ...baseOrder,
+      files: [...reusableFiles, ...baseOrder.files],
+      history: [
+        buildEvent(
+          "importacion",
+          `Pedido creado con ${order.lines.length} lineas${reusableFiles.length ? ` y ${reusableFiles.length} recurso(s) existentes ligados por SKU.` : "."}`,
+          user.name
+        ),
+        ...(reusableFiles.length ? [buildEvent("recursos", `${reusableFiles.length} archivo(s) detectados desde pedidos anteriores.`, user.name)] : []),
+        ...order.history
+      ]
     });
 
     saveOrder(normalized);
@@ -452,6 +543,7 @@ export async function patchOrder(
     | ({ type: "addFile"; file: LinkedFile } & AuthPayload)
     | ({ type: "updateFileSku"; fileId: string; sku: string } & AuthPayload)
     | ({ type: "updateFileMeta"; fileId: string; updates: FileUpdate } & AuthPayload)
+    | ({ type: "linkExistingResources" } & AuthPayload)
     | ({ type: "deleteFile"; fileId: string } & AuthPayload)
     | ({ type: "addLine"; line: OrderLine } & AuthPayload)
     | ({ type: "deleteLine"; lineId: string } & AuthPayload)
@@ -743,6 +835,25 @@ export async function patchOrder(
             : file
         ),
         history: [buildEvent("archivo metadata", `Archivo actualizado: ${target.name}.`, user.name), ...order.history]
+      });
+    }
+
+    if (action.type === "linkExistingResources") {
+      const allOrders = readOrdersFromDatabase(database);
+      const reusableFiles = findReusableFiles(order, allOrders);
+      nextOrder = normalizeOrder({
+        ...order,
+        files: [...reusableFiles, ...order.files],
+        history: [
+          buildEvent(
+            "recursos",
+            reusableFiles.length
+              ? `${reusableFiles.length} archivo(s) existentes ligados automaticamente por SKU.`
+              : "No se encontraron recursos nuevos para los SKU del pedido.",
+            user.name
+          ),
+          ...order.history
+        ]
       });
     }
 

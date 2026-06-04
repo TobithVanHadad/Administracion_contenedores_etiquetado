@@ -109,7 +109,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Archivo no encontrado." }, { status: 404 });
   }
 
-  const fullPath = path.join(uploadDir, order.id, file.storedName);
+  const fullPath = path.join(uploadDir, file.sourceOrderId || order.id, file.storedName);
   const bytes = await readFile(fullPath);
   const extension = path.extname(file.originalName || file.name).toLowerCase();
   const disposition = file.previewable ? "inline" : "attachment";
@@ -204,7 +204,7 @@ export async function POST(request: NextRequest) {
 
     const { orders: updatedOrders, removedFiles } = await addFilesToOrder(orderId, linkedFiles, { user, pin }, { overwriteExisting });
     for (const removedFile of removedFiles) {
-      if (removedFile.storedName) {
+      if (removedFile.storedName && (!removedFile.sourceOrderId || removedFile.sourceOrderId === orderId)) {
         await unlink(path.join(uploadDir, orderId, removedFile.storedName)).catch(() => undefined);
       }
     }
@@ -228,7 +228,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     const { orders, removedFile } = await deleteFileFromOrder(orderId, fileId, { user, pin });
-    if (removedFile?.storedName) {
+    if (removedFile?.storedName && (!removedFile.sourceOrderId || removedFile.sourceOrderId === orderId)) {
       await unlink(path.join(uploadDir, orderId, removedFile.storedName)).catch(() => undefined);
     }
 

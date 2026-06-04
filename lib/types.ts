@@ -105,6 +105,9 @@ export type LinkedFile = {
   labelSize?: string;
   labelCategory?: string;
   labelVariant?: string;
+  sourceFileId?: string;
+  sourceOrderId?: string;
+  sourceOrderCode?: string;
   originalName?: string;
   storedName?: string;
   mimeType?: string;

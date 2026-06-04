@@ -884,6 +884,23 @@ export default function Home() {
     void patchOrder(orderId, { type: "updateFileMeta", fileId, updates: nextUpdates }, "Archivo actualizado");
   }
 
+  async function linkExistingResources(orderId: string) {
+    const beforeCount = orders.find((order) => order.id === orderId)?.files.length ?? 0;
+    const nextOrders = await patchOrder(orderId, { type: "linkExistingResources" }, "Recursos detectados");
+    const afterCount = nextOrders.find((order) => order.id === orderId)?.files.length ?? beforeCount;
+    const linkedCount = Math.max(0, afterCount - beforeCount);
+
+    setFileUploadFeedback((current) => ({
+      ...current,
+      [orderId]: {
+        message: linkedCount
+          ? `${linkedCount} recurso(s) existentes ligados por SKU desde otros pedidos.`
+          : "No encontre recursos nuevos para los SKU de este pedido.",
+        tone: linkedCount ? "success" : "warning"
+      }
+    }));
+  }
+
   function deleteFile(orderId: string, fileId: string) {
     void applyServerOrders(
       fetch("/api/files", {
@@ -1266,6 +1283,7 @@ export default function Home() {
       ]
     };
 
+    const initialFileCount = order.files.length;
     const nextOrders = await applyServerOrders(
       fetch("/api/orders", {
         method: "POST",
@@ -1274,11 +1292,19 @@ export default function Home() {
       }),
       "Pedido creado correctamente"
     );
+    const createdOrder = nextOrders.find((nextOrder) => nextOrder.id === order.id);
+    const linkedResourceCount = Math.max(0, (createdOrder?.files.length ?? initialFileCount) - initialFileCount);
     setSelectedOrderId(order.id);
     setPreviewRows([]);
     setImportText("");
     setImportMeta(defaultImportMeta);
-    setImportMessage(nextOrders.some((nextOrder) => nextOrder.id === order.id) ? "Pedido creado correctamente." : "No se pudo crear el pedido.");
+    setImportMessage(
+      nextOrders.some((nextOrder) => nextOrder.id === order.id)
+        ? linkedResourceCount
+          ? `Pedido creado correctamente. ${linkedResourceCount} recurso(s) existentes ligados por SKU.`
+          : "Pedido creado correctamente."
+        : "No se pudo crear el pedido."
+    );
     setActiveTab("pedidos");
   }
 
@@ -1469,6 +1495,7 @@ export default function Home() {
               updateLineColor={updateLineColor}
               updateLineVisibility={updateLineVisibility}
               updateFileMeta={updateFileMeta}
+              linkExistingResources={linkExistingResources}
               updateLabelDevelopmentStatus={updateLabelDevelopmentStatus}
               updateOrderField={updateOrderField}
               updateWarehouseLabelingStatus={updateWarehouseLabelingStatus}
@@ -1603,6 +1630,7 @@ function OrderDetail({
   updateWarehouseStatus,
   recordPrint,
   updateFileMeta,
+  linkExistingResources,
   updateLineVisibility
 }: {
   order: Order;
@@ -1628,6 +1656,7 @@ function OrderDetail({
   updateWarehouseStatus: (orderId: string, lineId: string, status: WarehouseStatus) => void;
   recordPrint: (orderId: string, lineId: string, draft: PrintDraft) => void;
   updateFileMeta: (orderId: string, fileId: string, updates: FileMetadataUpdate) => void;
+  linkExistingResources: (orderId: string) => void;
   updateLineVisibility: (orderId: string, lineId: string, hidden: boolean) => void;
 }) {
   const planningConfig = getOrderPlanningConfig(order);
@@ -2395,6 +2424,10 @@ function OrderDetail({
               />
             </label>
             <p className="upload-help">El nombre del archivo debe incluir el SKU del pedido. Si no hay coincidencia, se descarta automaticamente.</p>
+            <button className="ghost-button compact resource-link-button" onClick={() => linkExistingResources(order.id)} type="button">
+              <FolderOpen size={16} />
+              Detectar recursos existentes
+            </button>
             {fileUploadFeedback && (
               <div className={`upload-feedback ${fileUploadFeedback.tone}`} aria-live="polite">
                 {fileUploadFeedback.message}
@@ -2438,6 +2471,7 @@ function OrderDetail({
                     <span>{file.sku ? `SKU ${file.sku}` : "Sin SKU"}</span>
                     <span>{file.labelSizeCode ? `${file.labelSizeCode} ${file.labelSize ?? ""}` : "Sin tamano"}</span>
                     <span>{file.labelCategory || "General"}</span>
+                    {file.sourceOrderCode && <span>Origen {file.sourceOrderCode}</span>}
                     <span>{formatFileSize(file.size)}</span>
                   </div>
                   <div className="file-meta-grid">
