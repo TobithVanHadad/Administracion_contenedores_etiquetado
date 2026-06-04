@@ -34,8 +34,22 @@ type StoredUser = AppUser & {
   pinHash: string;
 };
 
+type FileUpdate = Partial<
+  Pick<LinkedFile, "type" | "name" | "sku" | "labelSizeCode" | "labelSize" | "labelCategory" | "labelVariant">
+>;
+
 let db: DatabaseSync | undefined;
 let writeQueue = Promise.resolve();
+
+const labelSizeCatalog: Record<string, string> = {
+  L7: "6.4x3.8",
+  L6: "10.2x7.6",
+  L5: "3.0x2.2",
+  L4: "2.5x5.1",
+  L3: "7.0x7.0",
+  L2: "7.6x5.1",
+  L1: "6.3x5.1"
+};
 
 const seedUserRows: Array<AppUser & { pin: string; pinHash: string }> = [
   { id: "usr-amira", name: "Amira", role: "admin", active: true, pin: "1001", pinHash: "" },
@@ -200,6 +214,30 @@ function saveOrder(order: Order) {
     );
 }
 
+function normalizeFileKey(value?: string) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function labelSizeFromCode(code?: string) {
+  const normalized = String(code ?? "").toUpperCase();
+  return labelSizeCatalog[normalized] ?? "";
+}
+
+function fileMatchesReplacement(existing: LinkedFile, incoming: LinkedFile) {
+  if (!existing.sku || !incoming.sku || existing.sku !== incoming.sku) return false;
+  if (existing.type !== incoming.type) return false;
+
+  const sameName =
+    normalizeFileKey(existing.originalName || existing.name) === normalizeFileKey(incoming.originalName || incoming.name);
+  const sameLabelSize = Boolean(incoming.labelSizeCode && existing.labelSizeCode === incoming.labelSizeCode);
+  const sameCategory = normalizeFileKey(existing.labelCategory) === normalizeFileKey(incoming.labelCategory);
+
+  return sameName || (sameLabelSize && sameCategory);
+}
+
 function can(role: UserRole, action: string, field?: keyof Order) {
   if (role === "admin") return true;
   if (role === "consulta") return false;
@@ -214,7 +252,7 @@ function can(role: UserRole, action: string, field?: keyof Order) {
     return isPlanning || role === "etiquetado" || role === "aprobador";
   }
 
-  if (action === "addFiles" || action === "updateFileSku" || action === "deleteFile") {
+  if (action === "addFiles" || action === "updateFileSku" || action === "updateFileMeta" || action === "deleteFile") {
     return isPlanning || role === "etiquetado" || role === "aprobador";
   }
 
@@ -413,6 +451,7 @@ export async function patchOrder(
     | ({ type: "restore" } & AuthPayload)
     | ({ type: "addFile"; file: LinkedFile } & AuthPayload)
     | ({ type: "updateFileSku"; fileId: string; sku: string } & AuthPayload)
+    | ({ type: "updateFileMeta"; fileId: string; updates: FileUpdate } & AuthPayload)
     | ({ type: "deleteFile"; fileId: string } & AuthPayload)
     | ({ type: "addLine"; line: OrderLine } & AuthPayload)
     | ({ type: "deleteLine"; lineId: string } & AuthPayload)
@@ -672,6 +711,41 @@ export async function patchOrder(
       });
     }
 
+    if (action.type === "updateFileMeta") {
+      const target = order.files.find((file) => file.id === action.fileId);
+      if (!target) throw new Error("Archivo no encontrado.");
+
+      const nextSku = action.updates.sku !== undefined ? action.updates.sku : target.sku;
+      const line = nextSku ? order.lines.find((candidate) => candidate.sku === nextSku) : undefined;
+      const nextLabelSizeCode =
+        action.updates.labelSizeCode !== undefined ? action.updates.labelSizeCode.toUpperCase() : target.labelSizeCode;
+      const nextLabelSize =
+        action.updates.labelSizeCode !== undefined ? labelSizeFromCode(nextLabelSizeCode) : action.updates.labelSize ?? target.labelSize;
+
+      nextOrder = normalizeOrder({
+        ...order,
+        files: order.files.map((file) =>
+          file.id === action.fileId
+            ? {
+                ...file,
+                ...action.updates,
+                name: action.updates.name?.trim() || file.name,
+                sku: nextSku || undefined,
+                lineId: nextSku ? line?.id : undefined,
+                labelSizeCode: nextLabelSizeCode || undefined,
+                labelSize: nextLabelSize || undefined,
+                labelCategory:
+                  action.updates.labelCategory !== undefined ? action.updates.labelCategory.trim() || undefined : file.labelCategory,
+                labelVariant:
+                  action.updates.labelVariant !== undefined ? action.updates.labelVariant.trim() || undefined : file.labelVariant,
+                updatedAt: new Date().toISOString()
+              }
+            : file
+        ),
+        history: [buildEvent("archivo metadata", `Archivo actualizado: ${target.name}.`, user.name), ...order.history]
+      });
+    }
+
     if (action.type === "deleteFile") {
       const deletedFile = order.files.find((file) => file.id === action.fileId);
       nextOrder = normalizeOrder({
@@ -704,15 +778,20 @@ export async function patchOrder(
   });
 }
 
-export async function addFilesToOrder(orderId: string, files: LinkedFile[], auth: AuthPayload) {
+export async function addFilesToOrder(orderId: string, files: LinkedFile[], auth: AuthPayload, options: { overwriteExisting?: boolean } = {}) {
   const user = await authenticate(auth, "addFiles");
+  let removedFiles: LinkedFile[] = [];
 
-  return withWrite(async () => {
+  const orders = await withWrite(async () => {
     const database = await openDb();
     const row = database.prepare("SELECT data FROM orders WHERE id = ?").get(orderId) as { data: string } | undefined;
     if (!row) throw new Error("Pedido no encontrado.");
 
     const order = rowToOrder(row);
+    removedFiles = options.overwriteExisting
+      ? order.files.filter((file) => files.some((incoming) => fileMatchesReplacement(file, incoming)))
+      : [];
+
     const nextOrder = normalizeOrder({
       ...order,
       files: [
@@ -721,13 +800,22 @@ export async function addFilesToOrder(orderId: string, files: LinkedFile[], auth
           storageStatus: "temporal" as const,
           addedAt: new Date().toISOString()
         })),
-        ...order.files
+        ...order.files.filter((file) => !removedFiles.some((removed) => removed.id === file.id))
       ],
-      history: [buildEvent("archivos", `${files.length} archivo(s) cargados y relacionados automaticamente cuando fue posible.`, user.name), ...order.history]
+      history: [
+        buildEvent(
+          "archivos",
+          `${files.length} archivo(s) cargados${removedFiles.length ? `; ${removedFiles.length} reemplazado(s).` : " y relacionados automaticamente cuando fue posible."}`,
+          user.name
+        ),
+        ...order.history
+      ]
     });
 
     saveOrder(nextOrder);
   });
+
+  return { orders, removedFiles };
 }
 
 export async function deleteFileFromOrder(orderId: string, fileId: string, auth: AuthPayload) {

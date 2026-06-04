@@ -101,6 +101,10 @@ export type LinkedFile = {
   url: string;
   sku?: string;
   lineId?: string;
+  labelSizeCode?: string;
+  labelSize?: string;
+  labelCategory?: string;
+  labelVariant?: string;
   originalName?: string;
   storedName?: string;
   mimeType?: string;
@@ -108,6 +112,7 @@ export type LinkedFile = {
   previewable?: boolean;
   storageStatus?: FileStorageStatus;
   addedAt?: string;
+  updatedAt?: string;
   preservedAt?: string;
 };
 

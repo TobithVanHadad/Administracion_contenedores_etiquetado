@@ -13,6 +13,15 @@ const dataDir = configuredDataDir
   : path.join(process.cwd(), "data");
 const uploadDir = path.join(dataDir, "uploads");
 const allowedExtensions = new Set([".nlbl", ".btw", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"]);
+const labelSizeCatalog: Record<string, string> = {
+  L7: "6.4x3.8",
+  L6: "10.2x7.6",
+  L5: "3.0x2.2",
+  L4: "2.5x5.1",
+  L3: "7.0x7.0",
+  L2: "7.6x5.1",
+  L1: "6.3x5.1"
+};
 
 function safeName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
@@ -41,11 +50,51 @@ function contentTypeFor(extension: string, fallback?: string) {
   return fallback || "application/octet-stream";
 }
 
+function cleanText(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseFileMetadata(formData: FormData) {
+  const raw = formData.get("fileMetadata");
+  if (typeof raw !== "string" || !raw.trim()) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Array<Partial<LinkedFile>>) : [];
+  } catch {
+    return [];
+  }
+}
+
+function metadataFileType(value: unknown): FileType | undefined {
+  return value === "nlbl" || value === "btw" || value === "imagen" || value === "pdf" || value === "drive" || value === "otro"
+    ? value
+    : undefined;
+}
+
 function detectSku(filename: string, skus: string[]) {
   const normalized = filename.toLowerCase();
   return [...skus]
     .sort((a, b) => b.length - a.length)
     .find((sku) => sku && normalized.includes(sku.toLowerCase()));
+}
+
+function detectLabelSize(filename: string) {
+  const normalized = filename.toUpperCase();
+  const match = normalized.match(/(?:^|[^A-Z0-9])(L[1-7])(?:[^0-9]|$)/);
+  const code = match?.[1];
+  return code ? { code, size: labelSizeCatalog[code] } : undefined;
+}
+
+function detectLabelCategory(filename: string, extension: string) {
+  const normalized = filename.toLowerCase();
+  if (normalized.includes("caja") || normalized.includes("case") || normalized.includes("carton")) return "Caja";
+  if (normalized.includes("producto") || normalized.includes("product")) return "Producto";
+  if (normalized.includes("orden") || normalized.includes("order")) return "Orden";
+  if (extension === ".btw" || extension === ".nlbl") return "Etiqueta";
+  if (extension === ".pdf") return "PDF";
+  if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) return "Imagen";
+  return "General";
 }
 
 export async function GET(request: NextRequest) {
@@ -79,7 +128,9 @@ export async function POST(request: NextRequest) {
     const orderId = String(formData.get("orderId") || "");
     const user = String(formData.get("user") || "");
     const pin = String(formData.get("pin") || "");
+    const overwriteExisting = String(formData.get("overwriteExisting") || "") === "1";
     const uploadedFiles = formData.getAll("files").filter((file): file is File => file instanceof File);
+    const metadataList = parseFileMetadata(formData);
 
     if (!orderId) return NextResponse.json({ error: "Falta pedido." }, { status: 400 });
     if (uploadedFiles.length === 0) return NextResponse.json({ error: "No se recibieron archivos." }, { status: 400 });
@@ -92,19 +143,29 @@ export async function POST(request: NextRequest) {
     const linkedFiles: LinkedFile[] = [];
     const rejectedFiles: Array<{ name: string; reason: string }> = [];
 
-    for (const file of uploadedFiles) {
+    for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
+      const file = uploadedFiles[fileIndex];
+      const metadata = metadataList[fileIndex] ?? {};
       const extension = path.extname(file.name).toLowerCase();
       if (!allowedExtensions.has(extension)) {
-        return NextResponse.json({ error: `Tipo no permitido: ${file.name}` }, { status: 400 });
+        rejectedFiles.push({ name: file.name, reason: "Tipo de archivo no permitido." });
+        continue;
       }
-    }
 
-    for (const file of uploadedFiles) {
-      const extension = path.extname(file.name).toLowerCase();
       const id = uid("file");
       const storedName = `${id}-${safeName(file.name)}`;
-      const detectedSku = detectSku(file.name, skus);
+      const metadataSku = cleanText(metadata.sku);
+      const detectedSku = metadataSku && skus.includes(metadataSku) ? metadataSku : detectSku(file.name, skus);
       const line = detectedSku ? order.lines.find((candidate) => candidate.sku === detectedSku) : undefined;
+      const detectedLabelSize = detectLabelSize(file.name);
+      const metadataLabelSizeCode = cleanText(metadata.labelSizeCode).toUpperCase();
+      const labelSizeCode = metadataLabelSizeCode || detectedLabelSize?.code;
+      const labelSize = labelSizeCode ? labelSizeCatalog[labelSizeCode] || cleanText(metadata.labelSize) : detectedLabelSize?.size;
+      const labelCategory = cleanText(metadata.labelCategory) || detectLabelCategory(file.name, extension);
+      const labelVariant = cleanText(metadata.labelVariant);
+      const displayName = cleanText(metadata.name) || file.name;
+      const originalName = cleanText(metadata.originalName) || file.name;
+      const fileType = metadataFileType(metadata.type) ?? fileTypeFromExtension(extension);
 
       if (!detectedSku || !line) {
         rejectedFiles.push({ name: file.name, reason: "Sin coincidencia de SKU en el pedido." });
@@ -119,12 +180,16 @@ export async function POST(request: NextRequest) {
 
       linkedFiles.push({
         id,
-        type: fileTypeFromExtension(extension),
-        name: file.name,
+        type: fileType,
+        name: displayName,
         url: `/api/files?fileId=${encodeURIComponent(id)}`,
         sku: detectedSku,
         lineId: line?.id,
-        originalName: file.name,
+        labelSizeCode: labelSizeCode || undefined,
+        labelSize: labelSize || undefined,
+        labelCategory,
+        labelVariant: labelVariant || undefined,
+        originalName,
         storedName,
         mimeType: contentTypeFor(extension, file.type),
         size: file.size,
@@ -137,8 +202,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ orders, uploaded: [], rejected: rejectedFiles });
     }
 
-    const updatedOrders = await addFilesToOrder(orderId, linkedFiles, { user, pin });
-    return NextResponse.json({ orders: updatedOrders, uploaded: linkedFiles, rejected: rejectedFiles });
+    const { orders: updatedOrders, removedFiles } = await addFilesToOrder(orderId, linkedFiles, { user, pin }, { overwriteExisting });
+    for (const removedFile of removedFiles) {
+      if (removedFile.storedName) {
+        await unlink(path.join(uploadDir, orderId, removedFile.storedName)).catch(() => undefined);
+      }
+    }
+
+    return NextResponse.json({ orders: updatedOrders, uploaded: linkedFiles, rejected: rejectedFiles, replaced: removedFiles });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "No se pudieron subir archivos." }, { status: 400 });
   }

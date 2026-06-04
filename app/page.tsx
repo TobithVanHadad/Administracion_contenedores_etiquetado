@@ -218,12 +218,28 @@ type UploadFilesResponse = {
   orders: Order[];
   uploaded: LinkedFile[];
   rejected?: Array<{ name: string; reason: string }>;
+  replaced?: LinkedFile[];
 };
 
 type UploadFeedback = {
   message: string;
   tone: "neutral" | "success" | "warning" | "error";
 };
+
+type FileMetadataUpdate = Partial<
+  Pick<LinkedFile, "type" | "name" | "sku" | "labelSizeCode" | "labelSize" | "labelCategory" | "labelVariant">
+>;
+
+type UploadCandidate = {
+  file: File;
+  sku?: string;
+  type: FileType;
+  labelSizeCode?: string;
+  labelCategory?: string;
+};
+
+const uploadBatchMaxFiles = 8;
+const uploadBatchMaxBytes = 6 * 1024 * 1024;
 
 const defaultImportMeta: ImportMeta = {
   code: "",
@@ -287,6 +303,12 @@ function formatDateTime(date: string) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(date));
+}
+
+function formatFileSize(size?: number) {
+  if (!size) return "Tamano N/D";
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
 }
 
 function isLate(order: Order) {
@@ -538,6 +560,94 @@ function summarizeRejectedFiles(rejected: Array<{ name: string; reason: string }
   return rejected.length > 3 ? `${names} y ${rejected.length - 3} mas` : names;
 }
 
+function buildUploadBatches(files: File[]) {
+  const batches: File[][] = [];
+  let currentBatch: File[] = [];
+  let currentSize = 0;
+
+  for (const file of files) {
+    const wouldOverflow =
+      currentBatch.length > 0 &&
+      (currentBatch.length >= uploadBatchMaxFiles || currentSize + file.size > uploadBatchMaxBytes);
+
+    if (wouldOverflow) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentSize = 0;
+    }
+
+    currentBatch.push(file);
+    currentSize += file.size;
+  }
+
+  if (currentBatch.length > 0) batches.push(currentBatch);
+  return batches;
+}
+
+function uploadErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message === "Failed to fetch") {
+    return "No se pudo conectar con el servidor durante la subida. La app intentara evitar esto subiendo en lotes mas pequenos.";
+  }
+
+  return error instanceof Error ? error.message : "No se pudieron subir archivos.";
+}
+
+function fileTypeFromName(name: string): FileType {
+  const lowerName = name.toLowerCase();
+  if (lowerName.endsWith(".nlbl")) return "nlbl";
+  if (lowerName.endsWith(".btw")) return "btw";
+  if (lowerName.endsWith(".pdf")) return "pdf";
+  if (/\.(png|jpe?g|webp|gif)$/i.test(lowerName)) return "imagen";
+  return "otro";
+}
+
+function detectLabelSizeCodeFromName(name: string) {
+  const match = name.toUpperCase().match(/(?:^|[^A-Z0-9])(L[1-7])(?:[^0-9]|$)/);
+  return match?.[1];
+}
+
+function labelSizeValue(code?: string) {
+  return labelSizes.find((size) => size.code === code)?.size;
+}
+
+function detectLabelCategoryFromName(name: string, type: FileType) {
+  const normalized = normalizeText(name);
+  if (normalized.includes("caja") || normalized.includes("case") || normalized.includes("carton")) return "Caja";
+  if (normalized.includes("producto") || normalized.includes("product")) return "Producto";
+  if (normalized.includes("orden") || normalized.includes("order")) return "Orden";
+  if (type === "btw" || type === "nlbl") return "Etiqueta";
+  if (type === "pdf") return "PDF";
+  if (type === "imagen") return "Imagen";
+  return "General";
+}
+
+function buildUploadCandidate(file: File, order: Order): UploadCandidate {
+  const type = fileTypeFromName(file.name);
+  const skus = order.lines.map((line) => line.sku).sort((a, b) => b.length - a.length);
+  const normalizedName = normalizeText(file.name);
+  const sku = skus.find((candidate) => candidate && normalizedName.includes(normalizeText(candidate)));
+  const labelSizeCode = detectLabelSizeCodeFromName(file.name);
+
+  return {
+    file,
+    sku,
+    type,
+    labelSizeCode,
+    labelCategory: detectLabelCategoryFromName(file.name, type)
+  };
+}
+
+function fileMatchesUploadCandidate(existing: LinkedFile, candidate: UploadCandidate) {
+  if (!existing.sku || !candidate.sku || existing.sku !== candidate.sku) return false;
+  if (existing.type !== candidate.type) return false;
+
+  const sameName = normalizeText(existing.originalName || existing.name) === normalizeText(candidate.file.name);
+  const sameLabelSize = Boolean(candidate.labelSizeCode && existing.labelSizeCode === candidate.labelSizeCode);
+  const sameCategory = normalizeText(existing.labelCategory || "") === normalizeText(candidate.labelCategory || "");
+
+  return sameName || (sameLabelSize && sameCategory);
+}
+
 export default function Home() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -766,6 +876,14 @@ export default function Home() {
     void patchOrder(orderId, { type: "updateFileSku", fileId, sku }, "Archivo asignado a SKU");
   }
 
+  function updateFileMeta(orderId: string, fileId: string, updates: FileMetadataUpdate) {
+    const nextUpdates = { ...updates };
+    if (nextUpdates.labelSizeCode) {
+      nextUpdates.labelSize = labelSizeValue(nextUpdates.labelSizeCode);
+    }
+    void patchOrder(orderId, { type: "updateFileMeta", fileId, updates: nextUpdates }, "Archivo actualizado");
+  }
+
   function deleteFile(orderId: string, fileId: string) {
     void applyServerOrders(
       fetch("/api/files", {
@@ -916,17 +1034,20 @@ export default function Home() {
 
     const selectedFiles = Array.from(files);
     const order = orders.find((item) => item.id === orderId);
-    const matchedByName = order
-      ? selectedFiles.filter((file) =>
-          order.lines.some((line) => line.sku && normalizeText(file.name).includes(normalizeText(line.sku)))
-        ).length
-      : 0;
+    const uploadCandidates = order ? selectedFiles.map((file) => buildUploadCandidate(file, order)) : [];
+    const matchedByName = uploadCandidates.filter((candidate) => candidate.sku).length;
+    const duplicateCandidates = order
+      ? uploadCandidates.filter((candidate) => order.files.some((file) => fileMatchesUploadCandidate(file, candidate)))
+      : [];
+    const candidateByFile = new Map(uploadCandidates.map((candidate) => [candidate.file, candidate]));
+    const overwriteExisting =
+      duplicateCandidates.length > 0
+        ? window.confirm(
+            `Detecte ${duplicateCandidates.length} archivo(s) que parecen existir para el mismo SKU/tipo/tamano. Aceptar reemplaza el registro anterior; Cancelar conserva lo anterior y agrega los nuevos.`
+          )
+        : false;
 
-    const formData = new FormData();
-    formData.append("orderId", orderId);
-    formData.append("user", currentUser || "Operaciones");
-    formData.append("pin", currentPin);
-    selectedFiles.forEach((file) => formData.append("files", file));
+    const batches = buildUploadBatches(selectedFiles);
 
     setSyncMessage("Subiendo archivos...");
     setFileUploadFeedback((current) => ({
@@ -935,33 +1056,74 @@ export default function Home() {
         message:
           matchedByName === 0
             ? "Subiendo archivos. No detecte SKU en el nombre; si no coincide con el pedido, se descartara."
-            : `Subiendo ${selectedFiles.length} archivo(s). Detecte ${matchedByName} posible(s) coincidencia(s) por SKU.`,
+            : `Subiendo ${selectedFiles.length} archivo(s) en ${batches.length} lote(s). Detecte ${matchedByName} posible(s) coincidencia(s) por SKU.`,
         tone: matchedByName === 0 ? "warning" : "neutral"
       }
     }));
 
     try {
-      const response = await fetch("/api/files", {
-        method: "POST",
-        body: formData
-      });
+      const uploadedFiles: LinkedFile[] = [];
+      const rejectedFiles: Array<{ name: string; reason: string }> = [];
+      const replacedFiles: LinkedFile[] = [];
 
-      const data = (await response.json().catch(() => ({}))) as Partial<UploadFilesResponse> & { error?: string };
-      if (!response.ok || !data.orders) throw new Error(data.error || "No se pudieron subir archivos.");
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const batch = batches[batchIndex];
+        const formData = new FormData();
+        formData.append("orderId", orderId);
+        formData.append("user", currentUser || "Operaciones");
+        formData.append("pin", currentPin);
+        formData.append("overwriteExisting", overwriteExisting ? "1" : "0");
+        formData.append(
+          "fileMetadata",
+          JSON.stringify(
+            batch.map((file) => {
+              const candidate = candidateByFile.get(file);
+              return {
+                type: candidate?.type,
+                sku: candidate?.sku,
+                labelSizeCode: candidate?.labelSizeCode,
+                labelSize: labelSizeValue(candidate?.labelSizeCode),
+                labelCategory: candidate?.labelCategory
+              };
+            })
+          )
+        );
+        batch.forEach((file) => formData.append("files", file));
 
-      setOrders(data.orders);
+        setFileUploadFeedback((current) => ({
+          ...current,
+          [orderId]: {
+            message: `Subiendo lote ${batchIndex + 1} de ${batches.length} (${batch.length} archivo(s)).`,
+            tone: "neutral"
+          }
+        }));
 
-      const uploadedCount = data.uploaded?.length ?? 0;
-      const rejectedCount = data.rejected?.length ?? 0;
-      const rejectedSummary = summarizeRejectedFiles(data.rejected ?? []);
+        const response = await fetch("/api/files", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = (await response.json().catch(() => ({}))) as Partial<UploadFilesResponse> & { error?: string };
+        if (!response.ok || !data.orders) throw new Error(data.error || "No se pudieron subir archivos.");
+
+        setOrders(data.orders);
+        uploadedFiles.push(...(data.uploaded ?? []));
+        rejectedFiles.push(...(data.rejected ?? []));
+        replacedFiles.push(...(data.replaced ?? []));
+      }
+
+      const uploadedCount = uploadedFiles.length;
+      const rejectedCount = rejectedFiles.length;
+      const replacedCount = replacedFiles.length;
+      const rejectedSummary = summarizeRejectedFiles(rejectedFiles);
       let nextMessage = "";
       let nextTone: UploadFeedback["tone"] = "neutral";
 
       if (uploadedCount > 0 && rejectedCount > 0) {
-        nextMessage = `${uploadedCount} archivo(s) ligados. ${rejectedCount} descartado(s) sin SKU coincidente${rejectedSummary ? `: ${rejectedSummary}` : "."}`;
+        nextMessage = `${uploadedCount} archivo(s) ligados${replacedCount ? `; ${replacedCount} reemplazado(s)` : ""}. ${rejectedCount} descartado(s) sin SKU coincidente${rejectedSummary ? `: ${rejectedSummary}` : "."}`;
         nextTone = "warning";
       } else if (uploadedCount > 0) {
-        nextMessage = `${uploadedCount} archivo(s) ligados correctamente al pedido.`;
+        nextMessage = `${uploadedCount} archivo(s) ligados correctamente al pedido${replacedCount ? `; ${replacedCount} reemplazado(s)` : ""}.`;
         nextTone = "success";
       } else {
         nextMessage = `No se subio nada. ${rejectedCount} archivo(s) descartado(s) porque no tienen SKU coincidente en este pedido${
@@ -976,7 +1138,7 @@ export default function Home() {
         [orderId]: { message: nextMessage, tone: nextTone }
       }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "No se pudieron subir archivos.";
+      const message = uploadErrorMessage(error);
       setSyncMessage(message);
       setFileUploadFeedback((current) => ({
         ...current,
@@ -1306,7 +1468,7 @@ export default function Home() {
               updateLineCell={updateLineCell}
               updateLineColor={updateLineColor}
               updateLineVisibility={updateLineVisibility}
-              updateFileSku={updateFileSku}
+              updateFileMeta={updateFileMeta}
               updateLabelDevelopmentStatus={updateLabelDevelopmentStatus}
               updateOrderField={updateOrderField}
               updateWarehouseLabelingStatus={updateWarehouseLabelingStatus}
@@ -1422,7 +1584,6 @@ function OrderDetail({
   changeDispatchDate,
   updateOrderField,
   updateLineColor,
-  updateFileSku,
   closeOrder,
   uploadFiles,
   fileDraft,
@@ -1441,13 +1602,13 @@ function OrderDetail({
   updateWarehouseLabelingStatus,
   updateWarehouseStatus,
   recordPrint,
+  updateFileMeta,
   updateLineVisibility
 }: {
   order: Order;
   changeDispatchDate: (orderId: string, nextDate: string) => void;
   updateOrderField: <K extends keyof Order>(orderId: string, field: K, value: Order[K], label: string) => void;
   updateLineColor: (orderId: string, lineId: string, color: LineColor) => void;
-  updateFileSku: (orderId: string, fileId: string, sku: string) => void;
   closeOrder: (orderId: string) => void;
   uploadFiles: (orderId: string, files: FileList | null) => void;
   fileDraft: FileDraft;
@@ -1466,6 +1627,7 @@ function OrderDetail({
   updateWarehouseLabelingStatus: (orderId: string, lineId: string, status: WarehouseLabelingStatus) => void;
   updateWarehouseStatus: (orderId: string, lineId: string, status: WarehouseStatus) => void;
   recordPrint: (orderId: string, lineId: string, draft: PrintDraft) => void;
+  updateFileMeta: (orderId: string, fileId: string, updates: FileMetadataUpdate) => void;
   updateLineVisibility: (orderId: string, lineId: string, hidden: boolean) => void;
 }) {
   const planningConfig = getOrderPlanningConfig(order);
@@ -2257,32 +2419,89 @@ function OrderDetail({
               {order.files.length === 0 && <p className="empty-text">Sin archivos ligados.</p>}
               {order.files.map((file) => (
                 <div className="file-card" key={file.id}>
-                <a href={file.url} rel="noreferrer" target="_blank">
-                  <Link2 size={16} />
-                  <span>
-                    <strong>{file.name}</strong>
-                    <small>
-                      {fileTypeLabels[file.type]} - {file.storageStatus === "conservado" ? "Conservado en historico" : "Temporal activo"}
-                    </small>
-                  </span>
-                  <ExternalLink size={14} />
-                </a>
-                <button className="icon-danger file-delete-button" onClick={() => deleteFile(order.id, file.id)} title="Eliminar archivo" type="button">
-                  <Trash2 size={16} />
-                </button>
-                <label>
-                  SKU asignado
-                  <select value={file.sku ?? ""} onChange={(event) => updateFileSku(order.id, file.id, event.target.value)}>
-                    <option value="">Sin asignar</option>
-                    {order.lines.map((line) => (
-                      <option key={line.id} value={line.sku}>
-                        {line.sku} - {line.description}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {file.previewable && file.type === "imagen" && <img alt={file.name} className="file-preview-image" src={file.url} />}
-                {file.previewable && file.type === "pdf" && <iframe className="file-preview-pdf" src={file.url} title={file.name} />}
+                  <div className="file-card-header">
+                    <a href={file.url} rel="noreferrer" target="_blank">
+                      <Link2 size={16} />
+                      <span>
+                        <strong>{file.name}</strong>
+                        <small>
+                          {fileTypeLabels[file.type]} - {file.storageStatus === "conservado" ? "Conservado en historico" : "Temporal activo"}
+                        </small>
+                      </span>
+                      <ExternalLink size={14} />
+                    </a>
+                    <button className="icon-danger file-delete-button" onClick={() => deleteFile(order.id, file.id)} title="Eliminar archivo" type="button">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                  <div className="file-meta-badges">
+                    <span>{file.sku ? `SKU ${file.sku}` : "Sin SKU"}</span>
+                    <span>{file.labelSizeCode ? `${file.labelSizeCode} ${file.labelSize ?? ""}` : "Sin tamano"}</span>
+                    <span>{file.labelCategory || "General"}</span>
+                    <span>{formatFileSize(file.size)}</span>
+                  </div>
+                  <div className="file-meta-grid">
+                    <label>
+                      Nombre visible
+                      <input
+                        defaultValue={file.name}
+                        onBlur={(event) => {
+                          const nextName = event.target.value.trim();
+                          if (nextName && nextName !== file.name) updateFileMeta(order.id, file.id, { name: nextName });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      Tipo
+                      <select value={file.type} onChange={(event) => updateFileMeta(order.id, file.id, { type: event.target.value as FileType })}>
+                        {Object.entries(fileTypeLabels).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      SKU asignado
+                      <select value={file.sku ?? ""} onChange={(event) => updateFileMeta(order.id, file.id, { sku: event.target.value })}>
+                        <option value="">Sin asignar</option>
+                        {order.lines.map((line) => (
+                          <option key={line.id} value={line.sku}>
+                            {line.sku} - {line.description}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Tamano etiqueta
+                      <select value={file.labelSizeCode ?? ""} onChange={(event) => updateFileMeta(order.id, file.id, { labelSizeCode: event.target.value })}>
+                        <option value="">Sin tamano</option>
+                        {labelSizes.map((size) => (
+                          <option key={size.code} value={size.code}>
+                            {size.code} {size.size}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Categoria
+                      <input
+                        defaultValue={file.labelCategory ?? ""}
+                        onBlur={(event) => updateFileMeta(order.id, file.id, { labelCategory: event.target.value.trim() || "General" })}
+                        placeholder="Producto, Caja, General"
+                      />
+                    </label>
+                    <label>
+                      Variante
+                      <input
+                        defaultValue={file.labelVariant ?? ""}
+                        onBlur={(event) => updateFileMeta(order.id, file.id, { labelVariant: event.target.value.trim() })}
+                        placeholder="Cliente, idioma, version"
+                      />
+                    </label>
+                  </div>
+                  {file.previewable && file.type === "imagen" && <img alt={file.name} className="file-preview-image" src={file.url} />}
+                  {file.previewable && file.type === "pdf" && <iframe className="file-preview-pdf" src={file.url} title={file.name} />}
                 </div>
               ))}
             </div>
