@@ -717,17 +717,19 @@ export default function Home() {
   async function loadOrders(initial = false) {
     try {
       const response = await fetch("/api/orders", { cache: "no-store" });
-      if (!response.ok) throw new Error("No se pudo leer la API de pedidos.");
-      const data = (await response.json()) as { orders: Order[]; users: AppUser[] };
-      setOrders(data.orders);
-      if (data.users) {
-        setUsers(data.users);
-        setCurrentUser((current) => (data.users.some((user) => user.name === current) ? current : data.users[0]?.name || current));
+      const data = (await response.json().catch(() => ({}))) as { orders?: Order[]; users?: AppUser[]; error?: string };
+      if (!response.ok || !data.orders) throw new Error(data.error || "No se pudo leer la API de pedidos.");
+      const nextOrders = data.orders;
+      const nextUsers = data.users;
+      setOrders(nextOrders);
+      if (nextUsers) {
+        setUsers(nextUsers);
+        setCurrentUser((current) => (nextUsers.some((user) => user.name === current) ? current : nextUsers[0]?.name || current));
       }
-      setSelectedOrderId((current) => current || data.orders.find((order) => !order.archived)?.id || data.orders[0]?.id || "");
+      setSelectedOrderId((current) => current || nextOrders.find((order) => !order.archived)?.id || nextOrders[0]?.id || "");
       setSyncMessage("Datos sincronizados");
-    } catch {
-      setSyncMessage("Sin conexion con el servidor de pedidos");
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : "Sin conexion con el servidor de pedidos");
     } finally {
       if (initial) setLoading(false);
     }

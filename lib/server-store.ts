@@ -1,8 +1,9 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { sampleOrders } from "./sample-data";
+import { dataDir, ensurePersistentStorage } from "./storage";
 import { buildEvent, calculateLineProgress, lineColorLabels, normalizeOrder, statusFromLineProgress, uid } from "./order-utils";
 import {
   AppUser,
@@ -18,10 +19,6 @@ import {
   WarehouseStatus
 } from "./types";
 
-const configuredDataDir = process.env.ORVEL_DATA_DIR?.trim() || process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim();
-const dataDir = configuredDataDir
-  ? path.resolve(configuredDataDir)
-  : path.join(process.cwd(), "data");
 const legacyJsonFile = path.join(dataDir, "orders.json");
 const dbFile = path.join(dataDir, "pedidos-piloto.sqlite");
 
@@ -67,7 +64,7 @@ function hashPin(pin: string) {
 }
 
 async function openDb() {
-  await mkdir(dataDir, { recursive: true });
+  await ensurePersistentStorage();
 
   if (!db) {
     db = new DatabaseSync(dbFile);

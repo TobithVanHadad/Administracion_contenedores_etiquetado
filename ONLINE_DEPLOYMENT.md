@@ -66,4 +66,6 @@ Publicar la app actual sin migrar base de datos y archivos haria que:
 - Los archivos se pierdan si cambia el servidor.
 - Varias personas editando desde distintos paises puedan tener retrasos o inconsistencias.
 
-Para piloto online se puede usar polling rapido. Para produccion real conviene PostgreSQL + storage cloud + realtime.
+Para piloto online se puede usar polling rapido, pero Railway debe tener un volumen persistente conectado al servicio antes de cargar pedidos reales. La app bloquea el uso de almacenamiento efimero en Railway para evitar resets silenciosos en cada despliegue.
+
+Para produccion real conviene PostgreSQL + storage cloud + realtime.

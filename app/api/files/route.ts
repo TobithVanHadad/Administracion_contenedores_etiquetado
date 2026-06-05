@@ -3,15 +3,11 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { addFilesToOrder, clearFilesFromOrder, deleteFileFromOrder, readOrders } from "@/lib/server-store";
 import { uid } from "@/lib/order-utils";
+import { uploadDir } from "@/lib/storage";
 import { FileType, LinkedFile } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-const configuredDataDir = process.env.ORVEL_DATA_DIR?.trim() || process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim();
-const dataDir = configuredDataDir
-  ? path.resolve(configuredDataDir)
-  : path.join(process.cwd(), "data");
-const uploadDir = path.join(dataDir, "uploads");
 const allowedExtensions = new Set([".nlbl", ".btw", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"]);
 const labelSizeCatalog: Record<string, string> = {
   L7: "6.4x3.8",

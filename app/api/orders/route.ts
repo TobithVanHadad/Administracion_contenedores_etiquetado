@@ -4,9 +4,13 @@ import { createOrder, patchOrder, readOrders, readUsersPublic, replaceAllOrders,
 export const runtime = "nodejs";
 
 export async function GET() {
-  const orders = await readOrders();
-  const users = await readUsersPublic();
-  return NextResponse.json({ orders, users });
+  try {
+    const orders = await readOrders();
+    const users = await readUsersPublic();
+    return NextResponse.json({ orders, users });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Error inesperado" }, { status: 500 });
+  }
 }
 
 export async function POST(request: NextRequest) {
