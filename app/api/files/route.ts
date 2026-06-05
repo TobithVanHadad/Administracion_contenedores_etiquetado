@@ -1,7 +1,7 @@
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { addFilesToOrder, deleteFileFromOrder, readOrders } from "@/lib/server-store";
+import { addFilesToOrder, clearFilesFromOrder, deleteFileFromOrder, readOrders } from "@/lib/server-store";
 import { uid } from "@/lib/order-utils";
 import { FileType, LinkedFile } from "@/lib/types";
 
@@ -222,9 +222,21 @@ export async function DELETE(request: NextRequest) {
     const fileId = String(body.fileId || "");
     const user = String(body.user || "");
     const pin = String(body.pin || "");
+    const clearAll = Boolean(body.clearAll);
 
-    if (!orderId || !fileId) {
+    if (!orderId || (!fileId && !clearAll)) {
       return NextResponse.json({ error: "Falta pedido o archivo." }, { status: 400 });
+    }
+
+    if (clearAll) {
+      const { orders, removedFiles } = await clearFilesFromOrder(orderId, { user, pin });
+      for (const removedFile of removedFiles) {
+        if (removedFile.storedName && (!removedFile.sourceOrderId || removedFile.sourceOrderId === orderId)) {
+          await unlink(path.join(uploadDir, orderId, removedFile.storedName)).catch(() => undefined);
+        }
+      }
+
+      return NextResponse.json({ orders, removed: removedFiles.length });
     }
 
     const { orders, removedFile } = await deleteFileFromOrder(orderId, fileId, { user, pin });

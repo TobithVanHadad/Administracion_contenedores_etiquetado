@@ -884,9 +884,10 @@ export default function Home() {
     void patchOrder(orderId, { type: "updateFileMeta", fileId, updates: nextUpdates }, "Archivo actualizado");
   }
 
-  async function linkExistingResources(orderId: string) {
+  async function linkExistingResources(orderId: string, sourceOrderId?: string) {
     const beforeCount = orders.find((order) => order.id === orderId)?.files.length ?? 0;
-    const nextOrders = await patchOrder(orderId, { type: "linkExistingResources" }, "Recursos detectados");
+    const sourceOrder = orders.find((order) => order.id === sourceOrderId);
+    const nextOrders = await patchOrder(orderId, { type: "linkExistingResources", sourceOrderId }, "Recursos detectados");
     const afterCount = nextOrders.find((order) => order.id === orderId)?.files.length ?? beforeCount;
     const linkedCount = Math.max(0, afterCount - beforeCount);
 
@@ -894,9 +895,31 @@ export default function Home() {
       ...current,
       [orderId]: {
         message: linkedCount
-          ? `${linkedCount} recurso(s) existentes ligados por SKU desde otros pedidos.`
-          : "No encontre recursos nuevos para los SKU de este pedido.",
+          ? `${linkedCount} recurso(s) existentes ligados por SKU desde ${sourceOrder?.code || "pedidos del mismo cliente"}.`
+          : `No encontre recursos nuevos para los SKU de este pedido en ${sourceOrder?.code || "pedidos del mismo cliente"}.`,
         tone: linkedCount ? "success" : "warning"
+      }
+    }));
+  }
+
+  async function clearOrderFiles(orderId: string) {
+    const beforeCount = orders.find((order) => order.id === orderId)?.files.length ?? 0;
+    const nextOrders = await applyServerOrders(
+      fetch("/api/files", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId, clearAll: true, user: currentUser || "Operaciones", pin: currentPin })
+      }),
+      "Archivos eliminados"
+    );
+    const afterCount = nextOrders.find((order) => order.id === orderId)?.files.length ?? 0;
+    const removedCount = Math.max(0, beforeCount - afterCount);
+
+    setFileUploadFeedback((current) => ({
+      ...current,
+      [orderId]: {
+        message: `${removedCount} archivo(s) eliminados de este pedido.`,
+        tone: removedCount ? "success" : "warning"
       }
     }));
   }
@@ -1484,9 +1507,11 @@ export default function Home() {
               fileDraft={fileDraft}
               fileUploadFeedback={fileUploadFeedback[selectedOrder.id]}
               hiddenColumns={hiddenColumnsByOrder[selectedOrder.id] ?? []}
+              canClearFiles={(users.find((user) => user.name === currentUser)?.role ?? "") === "admin"}
               addLine={addLine}
               deleteLine={deleteLine}
               order={selectedOrder}
+              resourceSourceOrders={orders.filter((order) => order.id !== selectedOrder.id && order.files.length > 0)}
               setFileDraft={setFileDraft}
               toggleColumn={toggleColumn}
               addLabelRequirement={addLabelRequirement}
@@ -1496,6 +1521,7 @@ export default function Home() {
               updateLineVisibility={updateLineVisibility}
               updateFileMeta={updateFileMeta}
               linkExistingResources={linkExistingResources}
+              clearOrderFiles={clearOrderFiles}
               updateLabelDevelopmentStatus={updateLabelDevelopmentStatus}
               updateOrderField={updateOrderField}
               updateWarehouseLabelingStatus={updateWarehouseLabelingStatus}
@@ -1615,12 +1641,14 @@ function OrderDetail({
   uploadFiles,
   fileDraft,
   fileUploadFeedback,
+  canClearFiles,
   setFileDraft,
   addFile,
   deleteFile,
   addLine,
   deleteLine,
   hiddenColumns,
+  resourceSourceOrders,
   toggleColumn,
   addLabelRequirement,
   deleteLabelRequirement,
@@ -1631,6 +1659,7 @@ function OrderDetail({
   recordPrint,
   updateFileMeta,
   linkExistingResources,
+  clearOrderFiles,
   updateLineVisibility
 }: {
   order: Order;
@@ -1641,12 +1670,14 @@ function OrderDetail({
   uploadFiles: (orderId: string, files: FileList | null) => void;
   fileDraft: FileDraft;
   fileUploadFeedback?: UploadFeedback;
+  canClearFiles: boolean;
   setFileDraft: (draft: FileDraft) => void;
   addFile: (orderId: string) => void;
   deleteFile: (orderId: string, fileId: string) => void;
   addLine: (orderId: string, line: OrderLine) => void;
   deleteLine: (orderId: string, lineId: string) => void;
   hiddenColumns: string[];
+  resourceSourceOrders: Order[];
   toggleColumn: (orderId: string, column: string) => void;
   addLabelRequirement: (orderId: string, lineId: string, requirement: LabelRequirement) => void;
   deleteLabelRequirement: (orderId: string, lineId: string, requirementId: string) => void;
@@ -1656,7 +1687,8 @@ function OrderDetail({
   updateWarehouseStatus: (orderId: string, lineId: string, status: WarehouseStatus) => void;
   recordPrint: (orderId: string, lineId: string, draft: PrintDraft) => void;
   updateFileMeta: (orderId: string, fileId: string, updates: FileMetadataUpdate) => void;
-  linkExistingResources: (orderId: string) => void;
+  linkExistingResources: (orderId: string, sourceOrderId?: string) => void;
+  clearOrderFiles: (orderId: string) => void;
   updateLineVisibility: (orderId: string, lineId: string, hidden: boolean) => void;
 }) {
   const planningConfig = getOrderPlanningConfig(order);
@@ -1670,6 +1702,8 @@ function OrderDetail({
   const [showHiddenLines, setShowHiddenLines] = useState(false);
   const [printDrafts, setPrintDrafts] = useState<Record<string, PrintDraft>>({});
   const [requirementDrafts, setRequirementDrafts] = useState<Record<string, RequirementDraft>>({});
+  const [resourceSourceId, setResourceSourceId] = useState("same_customer");
+  const [clearFilesConfirm, setClearFilesConfirm] = useState("");
   const allColumns = order.columns?.length ? order.columns : defaultOrderColumns;
   const visibleColumns = allColumns.filter((column) => !hiddenColumns.includes(column));
   const labelDevProgress = averageProgress(order.lines, (line) => labelDevelopmentProgress[getLabelDevelopmentStatus(line)]);
@@ -2424,14 +2458,55 @@ function OrderDetail({
               />
             </label>
             <p className="upload-help">El nombre del archivo debe incluir el SKU del pedido. Si no hay coincidencia, se descarta automaticamente.</p>
-            <button className="ghost-button compact resource-link-button" onClick={() => linkExistingResources(order.id)} type="button">
-              <FolderOpen size={16} />
-              Detectar recursos existentes
-            </button>
+            <div className="resource-link-panel">
+              <label>
+                Referencia de recursos
+                <select value={resourceSourceId} onChange={(event) => setResourceSourceId(event.target.value)}>
+                  <option value="same_customer">Solo pedidos del mismo cliente</option>
+                  {resourceSourceOrders.map((sourceOrder) => (
+                    <option key={sourceOrder.id} value={sourceOrder.id}>
+                      {sourceOrder.code} - {sourceOrder.customer}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="ghost-button compact resource-link-button"
+                onClick={() => linkExistingResources(order.id, resourceSourceId === "same_customer" ? undefined : resourceSourceId)}
+                type="button"
+              >
+                <FolderOpen size={16} />
+                Detectar recursos existentes
+              </button>
+            </div>
             {fileUploadFeedback && (
               <div className={`upload-feedback ${fileUploadFeedback.tone}`} aria-live="polite">
                 {fileUploadFeedback.message}
               </div>
+            )}
+            {canClearFiles && (
+              <details className="danger-zone">
+                <summary>Zona protegida de archivos</summary>
+                <p>Elimina todos los archivos ligados a este pedido. Las referencias de otros pedidos se quitan de aqui, pero no borran el archivo original.</p>
+                <label>
+                  Escribe BORRAR ARCHIVOS
+                  <input value={clearFilesConfirm} onChange={(event) => setClearFilesConfirm(event.target.value)} placeholder="BORRAR ARCHIVOS" />
+                </label>
+                <button
+                  className="danger-button compact"
+                  disabled={clearFilesConfirm !== "BORRAR ARCHIVOS" || order.files.length === 0}
+                  onClick={() => {
+                    if (window.confirm(`Se eliminaran ${order.files.length} archivo(s) ligados a ${order.code}.`)) {
+                      void clearOrderFiles(order.id);
+                      setClearFilesConfirm("");
+                    }
+                  }}
+                  type="button"
+                >
+                  <Trash2 size={16} />
+                  Borrar todos los archivos de este pedido
+                </button>
+              </details>
             )}
             <div className="file-form">
               <select value={fileDraft.type} onChange={(event) => setFileDraft({ ...fileDraft, type: event.target.value as FileType })}>

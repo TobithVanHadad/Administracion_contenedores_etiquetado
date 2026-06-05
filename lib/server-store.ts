@@ -273,13 +273,19 @@ function cloneResourceFile(file: LinkedFile, sourceOrder: Order, targetOrder: Or
   };
 }
 
-function findReusableFiles(targetOrder: Order, orders: Order[]) {
+function findReusableFiles(targetOrder: Order, orders: Order[], options: { sourceOrderId?: string } = {}) {
   const existingKeys = new Set(targetOrder.files.map(resourceIdentity));
   const sourceSkus = new Set(targetOrder.lines.map((line) => line.sku).filter(Boolean));
+  const targetCustomer = normalizeFileKey(targetOrder.customer);
   const reusableFiles: LinkedFile[] = [];
 
   for (const sourceOrder of orders) {
     if (sourceOrder.id === targetOrder.id) continue;
+    if (options.sourceOrderId) {
+      if (sourceOrder.id !== options.sourceOrderId) continue;
+    } else if (normalizeFileKey(sourceOrder.customer) !== targetCustomer) {
+      continue;
+    }
 
     for (const file of sourceOrder.files) {
       if (!file.sku || !sourceSkus.has(file.sku)) continue;
@@ -543,7 +549,7 @@ export async function patchOrder(
     | ({ type: "addFile"; file: LinkedFile } & AuthPayload)
     | ({ type: "updateFileSku"; fileId: string; sku: string } & AuthPayload)
     | ({ type: "updateFileMeta"; fileId: string; updates: FileUpdate } & AuthPayload)
-    | ({ type: "linkExistingResources" } & AuthPayload)
+    | ({ type: "linkExistingResources"; sourceOrderId?: string } & AuthPayload)
     | ({ type: "deleteFile"; fileId: string } & AuthPayload)
     | ({ type: "addLine"; line: OrderLine } & AuthPayload)
     | ({ type: "deleteLine"; lineId: string } & AuthPayload)
@@ -840,7 +846,8 @@ export async function patchOrder(
 
     if (action.type === "linkExistingResources") {
       const allOrders = readOrdersFromDatabase(database);
-      const reusableFiles = findReusableFiles(order, allOrders);
+      const sourceOrder = action.sourceOrderId ? allOrders.find((candidate) => candidate.id === action.sourceOrderId) : undefined;
+      const reusableFiles = findReusableFiles(order, allOrders, { sourceOrderId: action.sourceOrderId });
       nextOrder = normalizeOrder({
         ...order,
         files: [...reusableFiles, ...order.files],
@@ -848,8 +855,8 @@ export async function patchOrder(
           buildEvent(
             "recursos",
             reusableFiles.length
-              ? `${reusableFiles.length} archivo(s) existentes ligados automaticamente por SKU.`
-              : "No se encontraron recursos nuevos para los SKU del pedido.",
+              ? `${reusableFiles.length} archivo(s) existentes ligados por SKU desde ${sourceOrder?.code || "pedidos del mismo cliente"}.`
+              : `No se encontraron recursos nuevos para los SKU del pedido en ${sourceOrder?.code || "pedidos del mismo cliente"}.`,
             user.name
           ),
           ...order.history
@@ -952,4 +959,27 @@ export async function deleteFileFromOrder(orderId: string, fileId: string, auth:
   });
 
   return { orders, removedFile };
+}
+
+export async function clearFilesFromOrder(orderId: string, auth: AuthPayload) {
+  const user = await authenticate(auth, "clearFiles");
+  let removedFiles: LinkedFile[] = [];
+
+  const orders = await withWrite(async () => {
+    const database = await openDb();
+    const row = database.prepare("SELECT data FROM orders WHERE id = ?").get(orderId) as { data: string } | undefined;
+    if (!row) throw new Error("Pedido no encontrado.");
+
+    const order = rowToOrder(row);
+    removedFiles = order.files;
+    const nextOrder = normalizeOrder({
+      ...order,
+      files: [],
+      history: [buildEvent("archivos", `${removedFiles.length} archivo(s) eliminados del pedido.`, user.name), ...order.history]
+    });
+
+    saveOrder(nextOrder);
+  });
+
+  return { orders, removedFiles };
 }

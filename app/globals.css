@@ -1203,10 +1203,58 @@ tr:last-child td {
   color: #9b1c1c;
 }
 
+.resource-link-panel {
+  background: #f8fbf9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.resource-link-panel label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 6px;
+}
+
 .resource-link-button {
   justify-content: center;
-  margin-bottom: 12px;
   width: 100%;
+}
+
+.danger-zone {
+  background: #fff8f8;
+  border: 1px solid #f0caca;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.danger-zone summary {
+  color: #9b1c1c;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.danger-zone p {
+  color: #7b3a3a;
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 8px 0;
+}
+
+.danger-zone label {
+  color: #7b3a3a;
+  display: grid;
+  font-size: 11px;
+  font-weight: 800;
+  gap: 5px;
+  margin-bottom: 8px;
 }
 
 .file-list {
