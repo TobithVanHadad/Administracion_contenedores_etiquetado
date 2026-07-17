@@ -2,8 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Pedidos y Etiquetado",
-  description: "Gestion operativa de pedidos, etiquetado y despachos"
+  title: "Flip",
+  description: "Gestion operativa de pedidos, etiquetado y despachos",
+  icons: {
+    icon: "/flip-icon.svg"
+  }
 };
 
 export default function RootLayout({

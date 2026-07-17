@@ -24,6 +24,8 @@ export type FileStorageStatus = "temporal" | "conservado";
 
 export type UserRole = "admin" | "planning" | "planning_warehouse" | "planeacion" | "etiquetado" | "aprobador" | "consulta";
 
+export type OrderDestination = "mexico" | "usa" | "europa" | "otro";
+
 export type WarehouseStatus =
   | "nothing_requested"
   | "requested"
@@ -132,6 +134,7 @@ export type Order = {
   code: string;
   customer: string;
   owner: string;
+  destination?: OrderDestination;
   priority: Priority;
   status: OrderStatus;
   labelingStatus: LabelingStatus;
@@ -147,6 +150,14 @@ export type Order = {
   lines: OrderLine[];
   files: LinkedFile[];
   history: OrderEvent[];
+};
+
+export type ChatMessage = {
+  id: string;
+  at: string;
+  user: string;
+  body: string;
+  directTo?: string;
 };
 
 export type ImportPreviewRow = Partial<OrderLine> & {

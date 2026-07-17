@@ -1,4 +1,4 @@
-import { FileType, LabelingStatus, LineColor, Order, OrderLine, OrderStatus } from "./types";
+import { FileType, LabelDevelopmentStatus, LabelingStatus, LineColor, Order, OrderLine, OrderStatus } from "./types";
 
 export const lineColorLabels: Record<LineColor, string> = {
   sin_color: "Sin color",
@@ -13,7 +13,15 @@ export function uid(prefix = "id") {
 }
 
 export function getLineColor(line: OrderLine): LineColor {
-  return line.lineColor ?? "sin_color";
+  return colorFromLabelDevelopment(line.labelDevelopmentStatus);
+}
+
+export function colorFromLabelDevelopment(status?: LabelDevelopmentStatus): LineColor {
+  if (status === "etiqueta_lista") return "verde";
+  if (status === "aprobado" || status === "enviado_aprobacion") return "azul";
+  if (status === "sintanxis") return "amarillo";
+  if (status === "no_ha_llegado") return "rojo";
+  return "sin_color";
 }
 
 export function calculateLineProgress(lines: OrderLine[]) {
@@ -48,6 +56,7 @@ export function normalizeOrder(order: Order): Order {
   return {
     ...order,
     columns,
+    destination: order.destination ?? "mexico",
     progress: lineProgress.progress,
     planningConfig: {
       labelMinutesPerLabel: order.planningConfig?.labelMinutesPerLabel ?? 15,
@@ -57,7 +66,6 @@ export function normalizeOrder(order: Order): Order {
     },
     lines: order.lines.map((line) => ({
       ...line,
-      lineColor: line.lineColor ?? "sin_color",
       hidden: line.hidden ?? false,
       warehouseStatus: line.warehouseStatus ?? "nothing_requested",
       labelDevelopmentStatus: line.labelDevelopmentStatus ?? "no_ha_llegado",

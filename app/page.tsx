@@ -3,6 +3,7 @@
 import {
   AlertTriangle,
   Archive,
+  Bell,
   CalendarDays,
   CheckCircle2,
   ChevronLeft,
@@ -16,23 +17,26 @@ import {
   FolderOpen,
   History,
   Link2,
+  MessageCircle,
   PackageCheck,
   Paperclip,
   Plus,
   Printer,
   RotateCcw,
   Search,
+  Send,
   SlidersHorizontal,
   Trash2,
   Truck,
   Upload,
   Users
 } from "lucide-react";
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { parseTableText } from "@/lib/importer";
 import {
   ApprovalStatus,
   AppUser,
+  ChatMessage,
   FileType,
   ImportPreviewRow,
   LabelDevelopmentStatus,
@@ -41,6 +45,7 @@ import {
   LineColor,
   LinkedFile,
   Order,
+  OrderDestination,
   OrderEstimate,
   OrderLine,
   OrderStatus,
@@ -54,6 +59,7 @@ const USER_KEY = "orvel-pedidos-user";
 const PIN_KEY = "orvel-pedidos-pin";
 const HIDDEN_COLUMNS_KEY = "orvel-hidden-columns";
 const DAILY_CAPACITY_HOURS = 16;
+const APP_NAME = "Flip";
 
 const statusLabels: Record<OrderStatus, string> = {
   importado: "Importado",
@@ -86,6 +92,13 @@ const priorityLabels: Record<Priority, string> = {
   alta: "Alta",
   media: "Media",
   baja: "Baja"
+};
+
+const destinationLabels: Record<OrderDestination, string> = {
+  mexico: "Mexico",
+  usa: "Estados Unidos",
+  europa: "Europa",
+  otro: "Otro"
 };
 
 const roleLabels: Record<UserRole, string> = {
@@ -187,6 +200,7 @@ type ImportMeta = {
   code: string;
   customer: string;
   owner: string;
+  destination: OrderDestination;
   priority: Priority;
   dispatchDate: string;
 };
@@ -238,6 +252,25 @@ type UploadCandidate = {
   labelCategory?: string;
 };
 
+type OperationalColumnId = "__status_color" | "__label_dev" | "__warehouse_labeling" | "__requirements" | "__suggested" | "__files" | "__print" | "__actions";
+
+type TableColumnDef = {
+  id: string;
+  label: string;
+  kind: "operational" | "data";
+};
+
+const operationalLineColumns: Array<TableColumnDef & { id: OperationalColumnId }> = [
+  { id: "__status_color", label: "Color", kind: "operational" },
+  { id: "__label_dev", label: "Elaboracion etiquetas", kind: "operational" },
+  { id: "__warehouse_labeling", label: "Etiquetado / almacen", kind: "operational" },
+  { id: "__requirements", label: "Etiquetas requeridas", kind: "operational" },
+  { id: "__suggested", label: "Multiplicacion sugerida", kind: "operational" },
+  { id: "__files", label: "Archivos", kind: "operational" },
+  { id: "__print", label: "Print Tracking", kind: "operational" },
+  { id: "__actions", label: "Acciones", kind: "operational" }
+];
+
 const uploadBatchMaxFiles = 8;
 const uploadBatchMaxBytes = 6 * 1024 * 1024;
 
@@ -245,6 +278,7 @@ const defaultImportMeta: ImportMeta = {
   code: "",
   customer: "",
   owner: "Operaciones MX",
+  destination: "mexico",
   priority: "media",
   dispatchDate: todayString()
 };
@@ -350,7 +384,12 @@ function calculateDetailedEstimate(lines: OrderLine[], config = { labelMinutesPe
 }
 
 function getLineColor(line: OrderLine): LineColor {
-  return line.lineColor ?? "sin_color";
+  const status = getLabelDevelopmentStatus(line);
+  if (status === "etiqueta_lista") return "verde";
+  if (status === "aprobado" || status === "enviado_aprobacion") return "azul";
+  if (status === "sintanxis") return "amarillo";
+  if (status === "no_ha_llegado") return "rojo";
+  return "sin_color";
 }
 
 function getLabelDevelopmentStatus(line: OrderLine): LabelDevelopmentStatus {
@@ -652,7 +691,7 @@ export default function Home() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncMessage, setSyncMessage] = useState("Conectando al servidor...");
-  const [currentUser, setCurrentUser] = useState("Amira");
+  const [currentUser, setCurrentUser] = useState("Gloria");
   const [currentPin, setCurrentPin] = useState("");
   const [loggedInUser, setLoggedInUser] = useState("");
   const [loginMessage, setLoginMessage] = useState("Acceso pendiente");
@@ -674,12 +713,19 @@ export default function Home() {
   const [userFilter, setUserFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatDirectTo, setChatDirectTo] = useState("");
+  const [chatStatus, setChatStatus] = useState("Chat listo");
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>("default");
+  const lastChatMessageId = useRef<string>("");
 
   useEffect(() => {
     const savedUser = window.localStorage.getItem(USER_KEY);
     const savedPin = window.localStorage.getItem(PIN_KEY);
     const savedColumns = window.localStorage.getItem(HIDDEN_COLUMNS_KEY);
-    if (savedUser) setCurrentUser(savedUser);
+    if (savedUser) setCurrentUser(savedUser === "Amira" || savedUser === "Diana" ? "Gloria" : savedUser);
     if (savedPin) setCurrentPin(savedPin);
     if (savedColumns) {
       try {
@@ -714,6 +760,19 @@ export default function Home() {
     window.localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify(hiddenColumnsByOrder));
   }, [hiddenColumnsByOrder]);
 
+  useEffect(() => {
+    if ("Notification" in window) setNotificationPermission(window.Notification.permission);
+  }, []);
+
+  useEffect(() => {
+    if (!loggedInUser) return;
+    void loadChatMessages(false);
+    const interval = window.setInterval(() => {
+      void loadChatMessages(true);
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [loggedInUser, currentUser]);
+
   async function loadOrders(initial = false) {
     try {
       const response = await fetch("/api/orders", { cache: "no-store" });
@@ -733,6 +792,70 @@ export default function Home() {
     } finally {
       if (initial) setLoading(false);
     }
+  }
+
+  async function loadChatMessages(allowNotification: boolean) {
+    try {
+      const response = await fetch(`/api/chat?user=${encodeURIComponent(currentUser)}`, { cache: "no-store" });
+      const data = (await response.json().catch(() => ({}))) as { messages?: ChatMessage[]; error?: string };
+      if (!response.ok || !data.messages) throw new Error(data.error || "No se pudo leer el chat.");
+
+      const latest = data.messages[data.messages.length - 1];
+      const previousLatestId = lastChatMessageId.current;
+      setChatMessages(data.messages);
+      if (latest) lastChatMessageId.current = latest.id;
+
+      if (
+        allowNotification &&
+        latest &&
+        previousLatestId &&
+        latest.id !== previousLatestId &&
+        latest.user !== currentUser &&
+        "Notification" in window &&
+        window.Notification.permission === "granted"
+      ) {
+        new window.Notification(`Flip - ${latest.user}`, {
+          body: latest.body,
+          icon: "/flip-icon.svg"
+        });
+      }
+    } catch (error) {
+      setChatStatus(error instanceof Error ? error.message : "No se pudo leer el chat.");
+    }
+  }
+
+  async function sendChatMessage() {
+    const body = chatDraft.trim();
+    if (!body) return;
+
+    setChatStatus("Enviando...");
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: currentUser, pin: currentPin, body, directTo: chatDirectTo || undefined })
+      });
+      const data = (await response.json().catch(() => ({}))) as { messages?: ChatMessage[]; error?: string };
+      if (!response.ok || !data.messages) throw new Error(data.error || "No se pudo enviar el mensaje.");
+
+      setChatMessages(data.messages);
+      lastChatMessageId.current = data.messages[data.messages.length - 1]?.id ?? lastChatMessageId.current;
+      setChatDraft("");
+      setChatStatus("Mensaje enviado");
+    } catch (error) {
+      setChatStatus(error instanceof Error ? error.message : "No se pudo enviar el mensaje.");
+    }
+  }
+
+  async function requestChatNotifications() {
+    if (!("Notification" in window)) {
+      setChatStatus("Este navegador no soporta notificaciones.");
+      return;
+    }
+
+    const permission = await window.Notification.requestPermission();
+    setNotificationPermission(permission);
+    setChatStatus(permission === "granted" ? "Notificaciones activadas" : "Notificaciones no activadas");
   }
 
   async function applyServerOrders(request: Promise<Response>, successMessage: string) {
@@ -1076,14 +1199,20 @@ export default function Home() {
 
     const selectedFiles = Array.from(files);
     const order = orders.find((item) => item.id === orderId);
-    const uploadCandidates = order ? selectedFiles.map((file) => buildUploadCandidate(file, order)) : [];
+    if (!order) {
+      setFileUploadFeedback((current) => ({
+        ...current,
+        [orderId]: { message: "Pedido no encontrado para subir archivos.", tone: "error" }
+      }));
+      return;
+    }
+
+    const uploadCandidates = selectedFiles.map((file) => buildUploadCandidate(file, order));
     const matchedByName = uploadCandidates.filter((candidate) => candidate.sku).length;
-    const duplicateCandidates = order
-      ? uploadCandidates.filter((candidate) => order.files.some((file) => fileMatchesUploadCandidate(file, candidate)))
-      : [];
+    const duplicateCandidates = uploadCandidates.filter((candidate) => order.files.some((file) => fileMatchesUploadCandidate(file, candidate)));
     const candidateByFile = new Map(uploadCandidates.map((candidate) => [candidate.file, candidate]));
     const overwriteExisting =
-      duplicateCandidates.length > 0
+      order.destination !== "usa" && duplicateCandidates.length > 0
         ? window.confirm(
             `Detecte ${duplicateCandidates.length} archivo(s) que parecen existir para el mismo SKU/tipo/tamano. Aceptar reemplaza el registro anterior; Cancelar conserva lo anterior y agrega los nuevos.`
           )
@@ -1289,6 +1418,7 @@ export default function Home() {
       code: importMeta.code.trim(),
       customer: importMeta.customer.trim(),
       owner: importMeta.owner.trim() || "Operaciones MX",
+      destination: importMeta.destination,
       priority: importMeta.priority,
       status: hasMissingLabels ? "pendiente_archivos" : "importado",
       labelingStatus: hasMissingLabels ? "bloqueado" : "pendiente",
@@ -1345,15 +1475,19 @@ export default function Home() {
     setSelectedOrderId(nextOrders.find((order) => !order.archived)?.id ?? nextOrders[0]?.id ?? "");
   }
 
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Operacion de pedidos y etiquetado</p>
-          <h1>Control operativo Orvel Europa</h1>
-        </div>
-        <div className="topbar-actions">
-          <label className="user-chip">
+  if (!loggedInUser) {
+    return (
+      <main className="login-shell">
+        <section className="login-panel">
+          <div className="brand-lockup">
+            <span className="brand-mark">FL</span>
+            <div>
+              <p className="eyebrow">Plataforma operativa</p>
+              <h1>{APP_NAME}</h1>
+            </div>
+          </div>
+          <p className="login-copy">Ingresa para ver pedidos, archivos, estatus y trazabilidad.</p>
+          <label className="login-field">
             Usuario
             <select value={currentUser} onChange={(event) => setCurrentUser(event.target.value)}>
               {users.length === 0 && <option value={currentUser}>{currentUser}</option>}
@@ -1364,23 +1498,47 @@ export default function Home() {
               ))}
             </select>
           </label>
-          <label className="user-chip">
+          <label className="login-field">
             PIN
             <input
               inputMode="numeric"
               onChange={(event) => setCurrentPin(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void handleLogin();
+              }}
               placeholder="0000"
               type="password"
               value={currentPin}
             />
           </label>
-          <button className="primary-button compact login-button" disabled={loginLoading} onClick={handleLogin} type="button">
-            <CheckCircle2 size={16} />
-            {loginLoading ? "Validando" : "Entrar"}
+          <button className="primary-button login-submit" disabled={loginLoading || loading} onClick={handleLogin} type="button">
+            <CheckCircle2 size={18} />
+            {loginLoading ? "Validando" : loading ? "Cargando" : "Entrar a Flip"}
           </button>
-          <span className={`login-status-chip ${loggedInUser ? "ok" : loginMessage.includes("incorrecto") ? "error" : ""}`}>
-            {loggedInUser ? `Acceso confirmado: ${loggedInUser}` : loginMessage}
-          </span>
+          <span className={`login-status-chip ${loginMessage.includes("incorrecto") ? "error" : ""}`}>{loginMessage}</span>
+          <small className="login-sync">{syncMessage}</small>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div>
+          <div className="brand-lockup compact">
+            <span className="brand-mark">FL</span>
+            <div>
+              <p className="eyebrow">Operacion de pedidos y etiquetado</p>
+              <h1>{APP_NAME}</h1>
+            </div>
+          </div>
+        </div>
+        <div className="topbar-actions">
+          <span className="login-status-chip ok">Sesion: {loggedInUser}</span>
+          <button className="ghost-button compact" onClick={() => setLoggedInUser("")} type="button">
+            Salir
+          </button>
           <span className="sync-chip">{loading ? "Cargando..." : syncMessage}</span>
           <button className="ghost-button" onClick={exportOrders} type="button">
             <Download size={18} />
@@ -1563,6 +1721,22 @@ export default function Home() {
       {activeTab === "historico" && <HistoryView orders={archivedOrders} restoreOrder={restoreOrder} />}
 
       {activeTab === "catalogo" && <CatalogView orders={orders} />}
+
+      <ChatWidget
+        chatDirectTo={chatDirectTo}
+        chatDraft={chatDraft}
+        chatMessages={chatMessages}
+        chatOpen={chatOpen}
+        chatStatus={chatStatus}
+        currentUser={currentUser}
+        notificationPermission={notificationPermission}
+        requestChatNotifications={requestChatNotifications}
+        sendChatMessage={sendChatMessage}
+        setChatDirectTo={setChatDirectTo}
+        setChatDraft={setChatDraft}
+        setChatOpen={setChatOpen}
+        users={users}
+      />
     </main>
   );
 }
@@ -1595,6 +1769,107 @@ function TabButton({ active, icon, label, onClick }: { active: boolean; icon: Re
       {icon}
       {label}
     </button>
+  );
+}
+
+function ChatWidget({
+  chatDirectTo,
+  chatDraft,
+  chatMessages,
+  chatOpen,
+  chatStatus,
+  currentUser,
+  notificationPermission,
+  requestChatNotifications,
+  sendChatMessage,
+  setChatDirectTo,
+  setChatDraft,
+  setChatOpen,
+  users
+}: {
+  chatDirectTo: string;
+  chatDraft: string;
+  chatMessages: ChatMessage[];
+  chatOpen: boolean;
+  chatStatus: string;
+  currentUser: string;
+  notificationPermission: NotificationPermission;
+  requestChatNotifications: () => void;
+  sendChatMessage: () => void;
+  setChatDirectTo: (value: string) => void;
+  setChatDraft: (value: string) => void;
+  setChatOpen: (value: boolean) => void;
+  users: AppUser[];
+}) {
+  const unreadFromOthers = chatMessages.filter((message) => message.user !== currentUser).slice(-3).length;
+
+  if (!chatOpen) {
+    return (
+      <button className="chat-fab" onClick={() => setChatOpen(true)} type="button">
+        <MessageCircle size={20} />
+        <span>Chat</span>
+        {unreadFromOthers > 0 && <strong>{unreadFromOthers}</strong>}
+      </button>
+    );
+  }
+
+  return (
+    <section className="chat-panel" aria-label="Chat operativo">
+      <div className="chat-header">
+        <div>
+          <strong>Chat Flip</strong>
+          <small>{chatStatus}</small>
+        </div>
+        <button className="ghost-button compact" onClick={() => setChatOpen(false)} type="button">
+          Cerrar
+        </button>
+      </div>
+      <div className="chat-tools">
+        <select value={chatDirectTo} onChange={(event) => setChatDirectTo(event.target.value)}>
+          <option value="">Todos</option>
+          {users
+            .filter((user) => user.name !== currentUser)
+            .map((user) => (
+              <option key={user.id} value={user.name}>
+                Directo a {user.name}
+              </option>
+            ))}
+        </select>
+        <button className="ghost-button compact" onClick={requestChatNotifications} type="button">
+          <Bell size={14} />
+          {notificationPermission === "granted" ? "Alertas ON" : "Alertas"}
+        </button>
+      </div>
+      <div className="chat-messages">
+        {chatMessages.length === 0 && <p className="empty-text">Sin mensajes.</p>}
+        {chatMessages.map((message) => (
+          <article className={`chat-message ${message.user === currentUser ? "mine" : ""}`} key={message.id}>
+            <span>
+              {message.user}
+              {message.directTo ? ` -> ${message.directTo}` : ""}
+            </span>
+            <p>{message.body}</p>
+            <small>{formatDateTime(message.at)}</small>
+          </article>
+        ))}
+      </div>
+      <div className="chat-compose">
+        <textarea
+          onChange={(event) => setChatDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void sendChatMessage();
+            }
+          }}
+          placeholder="Mensaje operativo..."
+          value={chatDraft}
+        />
+        <button className="primary-button compact" onClick={() => void sendChatMessage()} type="button">
+          <Send size={15} />
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1708,6 +1983,19 @@ function OrderDetail({
   const [clearFilesConfirm, setClearFilesConfirm] = useState("");
   const allColumns = order.columns?.length ? order.columns : defaultOrderColumns;
   const visibleColumns = allColumns.filter((column) => !hiddenColumns.includes(column));
+  const allTableColumns: TableColumnDef[] = [
+    ...operationalLineColumns,
+    ...allColumns.map((column) => ({ id: column, label: column, kind: "data" as const }))
+  ];
+  const visibleTableColumnCount = allTableColumns.filter((column) => !hiddenColumns.includes(column.id)).length;
+  const isVisibleColumn = (columnId: string) => !hiddenColumns.includes(columnId);
+  const fileGalleryGroups = Object.entries(fileTypeLabels)
+    .map(([type, label]) => ({
+      type: type as FileType,
+      label,
+      files: order.files.filter((file) => file.type === type)
+    }))
+    .filter((group) => group.files.length > 0);
   const labelDevProgress = averageProgress(order.lines, (line) => labelDevelopmentProgress[getLabelDevelopmentStatus(line)]);
   const warehouseProgress = averageProgress(order.lines, (line) => warehouseLabelingProgress[getWarehouseLabelingStatus(line)]);
   const hiddenLineCount = order.lines.filter((line) => line.hidden).length;
@@ -1843,6 +2131,26 @@ function OrderDetail({
             value={order.owner}
             onChange={(event) => updateOrderField(order.id, "owner", event.target.value, `Responsable actualizado a ${event.target.value}.`)}
           />
+        </label>
+        <label>
+          Destino
+          <select
+            value={order.destination ?? "mexico"}
+            onChange={(event) =>
+              updateOrderField(
+                order.id,
+                "destination",
+                event.target.value as OrderDestination,
+                `Destino cambiado a ${destinationLabels[event.target.value as OrderDestination]}.`
+              )
+            }
+          >
+            {Object.entries(destinationLabels).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
         </label>
         <label>
           Prioridad
@@ -2137,19 +2445,19 @@ function OrderDetail({
           <div className="column-toolbar">
             <div>
               <strong>Columnas visibles</strong>
-              <span>{visibleColumns.length} de {allColumns.length}</span>
+              <span>{visibleTableColumnCount} de {allTableColumns.length}</span>
             </div>
             <div className="column-toggles">
-              {allColumns.map((column) => (
+              {allTableColumns.map((column) => (
                 <button
-                  className={`column-toggle ${hiddenColumns.includes(column) ? "hidden" : ""}`}
-                  key={column}
-                  onClick={() => toggleColumn(order.id, column)}
-                  title={hiddenColumns.includes(column) ? `Mostrar ${column}` : `Ocultar ${column}`}
+                  className={`column-toggle ${hiddenColumns.includes(column.id) ? "hidden" : ""}`}
+                  key={column.id}
+                  onClick={() => toggleColumn(order.id, column.id)}
+                  title={hiddenColumns.includes(column.id) ? `Mostrar ${column.label}` : `Ocultar ${column.label}`}
                   type="button"
                 >
-                  {hiddenColumns.includes(column) ? <EyeOff size={14} /> : <Eye size={14} />}
-                  <span>{column}</span>
+                  {hiddenColumns.includes(column.id) ? <EyeOff size={14} /> : <Eye size={14} />}
+                  <span>{column.label}</span>
                 </button>
               ))}
             </div>
@@ -2177,11 +2485,11 @@ function OrderDetail({
             <table>
               <thead>
                 <tr>
-                  <th>Color</th>
-                  <th>Elaboracion etiquetas</th>
-                  <th>Etiquetado / almacen</th>
-                  <th>Etiquetas requeridas</th>
-                  <th>Multiplicacion sugerida</th>
+                  {isVisibleColumn("__status_color") && <th>Color</th>}
+                  {isVisibleColumn("__label_dev") && <th>Elaboracion etiquetas</th>}
+                  {isVisibleColumn("__warehouse_labeling") && <th>Etiquetado / almacen</th>}
+                  {isVisibleColumn("__requirements") && <th>Etiquetas requeridas</th>}
+                  {isVisibleColumn("__suggested") && <th>Multiplicacion sugerida</th>}
                   {visibleColumns.map((column) => (
                     <th className={isDescriptionColumn(column) ? "description-header" : undefined} key={column} title={column}>
                       <div className="column-heading">
@@ -2198,9 +2506,9 @@ function OrderDetail({
                       </div>
                     </th>
                   ))}
-                  <th>Archivos</th>
-                  <th>Print Tracking</th>
-                  <th>Acciones</th>
+                  {isVisibleColumn("__files") && <th>Archivos</th>}
+                  {isVisibleColumn("__print") && <th>Print Tracking</th>}
+                  {isVisibleColumn("__actions") && <th>Acciones</th>}
                 </tr>
               </thead>
               <tbody>
@@ -2212,22 +2520,17 @@ function OrderDetail({
                   const suggestedPieces = suggestedPiecesForLine(line);
                   return (
                     <tr className={`line-row ${getLineColor(line)} ${line.hidden ? "hidden-line" : ""}`} key={line.id}>
+                      {isVisibleColumn("__status_color") && (
                       <td>
                         <div className="line-color-controls">
-                          <select
-                            aria-label={`Color de avance de SKU ${line.sku}`}
-                            className={`line-color-select ${getLineColor(line)}`}
-                            value={getLineColor(line)}
-                            onChange={(event) => updateLineColor(order.id, line.id, event.target.value as LineColor)}
-                          >
-                            {(Object.keys(lineColorLabels) as LineColor[]).map((color) => (
-                              <option key={color} value={color}>
-                                {lineColorLabels[color]}
-                              </option>
-                            ))}
-                          </select>
+                          <span className={`line-color-select readonly ${getLineColor(line)}`}>
+                            {lineColorLabels[getLineColor(line)]}
+                          </span>
+                          <small>Segun elaboracion</small>
                         </div>
                       </td>
+                      )}
+                      {isVisibleColumn("__label_dev") && (
                       <td>
                         <div className="process-status-cell">
                           <span className={`process-badge label-${getLabelDevelopmentStatus(line)}`}>
@@ -2248,6 +2551,8 @@ function OrderDetail({
                           </select>
                         </div>
                       </td>
+                      )}
+                      {isVisibleColumn("__warehouse_labeling") && (
                       <td>
                         <div className="process-status-cell">
                           <span className={`process-badge warehouse-${getWarehouseLabelingStatus(line)}`}>
@@ -2268,6 +2573,8 @@ function OrderDetail({
                           </select>
                         </div>
                       </td>
+                      )}
+                      {isVisibleColumn("__requirements") && (
                       <td>
                         <div className="requirement-cell">
                           {(line.labelRequirements ?? []).length === 0 && <span className="muted-mini">Sin requerimientos</span>}
@@ -2307,6 +2614,8 @@ function OrderDetail({
                           </div>
                         </div>
                       </td>
+                      )}
+                      {isVisibleColumn("__suggested") && (
                       <td>
                         <div className="suggested-multiplication">
                           {suggestedPieces ? (
@@ -2322,6 +2631,7 @@ function OrderDetail({
                           )}
                         </div>
                       </td>
+                      )}
                       {visibleColumns.map((column) => (
                         <td
                           className={[
@@ -2371,6 +2681,7 @@ function OrderDetail({
                           })()}
                         </td>
                       ))}
+                      {isVisibleColumn("__files") && (
                       <td>
                         <div className="line-file-preview-list">
                           {filesForLine.length === 0 && <span className="muted-mini">Sin archivos</span>}
@@ -2379,6 +2690,8 @@ function OrderDetail({
                           ))}
                         </div>
                       </td>
+                      )}
+                      {isVisibleColumn("__print") && (
                       <td>
                         <div className="print-tracking-cell">
                           <div className="print-controls">
@@ -2422,6 +2735,8 @@ function OrderDetail({
                           )}
                         </div>
                       </td>
+                      )}
+                      {isVisibleColumn("__actions") && (
                       <td>
                         <div className="line-actions">
                           <button className="ghost-button compact" onClick={() => updateLineVisibility(order.id, line.id, !line.hidden)} type="button">
@@ -2432,6 +2747,7 @@ function OrderDetail({
                           </button>
                         </div>
                       </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -2527,7 +2843,14 @@ function OrderDetail({
             </div>
             <div className="file-list">
               {order.files.length === 0 && <p className="empty-text">Sin archivos ligados.</p>}
-              {order.files.map((file) => (
+              {fileGalleryGroups.map((group) => (
+                <section className="file-gallery-group" key={group.type}>
+                  <div className="file-gallery-heading">
+                    <strong>{group.label}</strong>
+                    <span>{group.files.length}</span>
+                  </div>
+                  <div className="file-gallery-grid">
+              {group.files.map((file) => (
                 <div className="file-card" key={file.id}>
                   <div className="file-card-header">
                     <a href={file.url} rel="noreferrer" target="_blank">
@@ -2614,6 +2937,9 @@ function OrderDetail({
                   {file.previewable && file.type === "imagen" && <img alt={file.name} className="file-preview-image" src={file.url} />}
                   {file.previewable && file.type === "pdf" && <iframe className="file-preview-pdf" src={file.url} title={file.name} />}
                 </div>
+              ))}
+                  </div>
+                </section>
               ))}
             </div>
           </section>
@@ -2841,6 +3167,16 @@ function ImportView({
           <label>
             Responsable
             <input value={importMeta.owner} onChange={(event) => setImportMeta({ ...importMeta, owner: event.target.value })} />
+          </label>
+          <label>
+            Destino
+            <select value={importMeta.destination} onChange={(event) => setImportMeta({ ...importMeta, destination: event.target.value as OrderDestination })}>
+              {Object.entries(destinationLabels).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             Prioridad

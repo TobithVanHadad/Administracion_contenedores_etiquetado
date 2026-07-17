@@ -49,8 +49,7 @@ const labelSizeCatalog: Record<string, string> = {
 };
 
 const seedUserRows: Array<AppUser & { pin: string; pinHash: string }> = [
-  { id: "usr-amira", name: "Amira", role: "admin", active: true, pin: "1001", pinHash: "" },
-  { id: "usr-diana", name: "Diana", role: "admin", active: true, pin: "1002", pinHash: "" },
+  { id: "usr-gloria", name: "Gloria", role: "admin", active: true, pin: "1002", pinHash: "" },
   { id: "usr-cala", name: "Cala", role: "admin", active: true, pin: "1003", pinHash: "" },
   { id: "usr-cristobal", name: "Cristobal", role: "admin", active: true, pin: "1004", pinHash: "" },
   { id: "usr-compras", name: "compras", role: "planning", active: true, pin: "2001", pinHash: "" },

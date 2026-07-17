@@ -10,7 +10,8 @@
     "build": "next build",
     "start": "next start -p ${PORT:-3010} -H 0.0.0.0",
     "lint": "next lint",
-    "migrate:railway": "node scripts/migrate-local-to-railway.mjs"
+    "migrate:railway": "node scripts/migrate-local-to-railway.mjs",
+    "restore:railway": "node scripts/restore-backup-to-railway.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",
