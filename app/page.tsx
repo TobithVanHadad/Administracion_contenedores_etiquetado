@@ -194,7 +194,7 @@ const lineColorLabels: Record<LineColor, string> = {
   verde: "Terminado"
 };
 
-type Tab = "pedidos" | "calendario" | "importar" | "historico" | "catalogo";
+type Tab = "pedidos" | "calendario" | "importar" | "historico" | "catalogo" | "biblioteca";
 
 type ImportMeta = {
   code: string;
@@ -250,6 +250,12 @@ type UploadCandidate = {
   type: FileType;
   labelSizeCode?: string;
   labelCategory?: string;
+};
+
+type FileLibraryItem = {
+  order: Order;
+  file: LinkedFile;
+  line?: OrderLine;
 };
 
 type OperationalColumnId = "__status_color" | "__label_dev" | "__warehouse_labeling" | "__requirements" | "__suggested" | "__files" | "__print" | "__actions";
@@ -687,6 +693,49 @@ function fileMatchesUploadCandidate(existing: LinkedFile, candidate: UploadCandi
   return sameName || (sameLabelSize && sameCategory);
 }
 
+function buildFileLibraryItems(orders: Order[]): FileLibraryItem[] {
+  return orders.flatMap((order) =>
+    order.files.map((file) => ({
+      order,
+      file,
+      line: order.lines.find((line) => line.id === file.lineId || line.sku === file.sku)
+    }))
+  );
+}
+
+function fileLibraryHaystack(item: FileLibraryItem) {
+  return normalizeText(
+    [
+      item.file.name,
+      item.file.originalName,
+      item.file.sku,
+      item.file.type,
+      item.file.labelCategory,
+      item.file.labelVariant,
+      item.file.labelSizeCode,
+      item.order.code,
+      item.order.customer,
+      item.line?.description
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+}
+
+function groupFileLibraryItems(items: FileLibraryItem[]) {
+  return Object.entries(fileTypeLabels)
+    .map(([type, label]) => ({
+      type: type as FileType,
+      label,
+      items: items.filter((item) => item.file.type === type)
+    }))
+    .filter((group) => group.items.length > 0);
+}
+
+function isStoredCatalogItem(item: FileLibraryItem) {
+  return Boolean(item.file.storedName || item.file.sourceOrderId || item.file.storageStatus === "conservado" || item.order.archived);
+}
+
 export default function Home() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1060,6 +1109,71 @@ export default function Home() {
     );
   }
 
+  async function replaceFile(orderId: string, file: LinkedFile, files: FileList | null) {
+    const replacement = files?.[0];
+    if (!replacement) return;
+
+    if (!file.sku) {
+      setSyncMessage("Asigna un SKU al archivo antes de reemplazarlo.");
+      return;
+    }
+
+    const replacementType = file.type === "drive" ? fileTypeFromName(replacement.name) : file.type;
+    const labelSizeCode = file.labelSizeCode || detectLabelSizeCodeFromName(replacement.name);
+    const formData = new FormData();
+    formData.append("orderId", orderId);
+    formData.append("user", currentUser || "Operaciones");
+    formData.append("pin", currentPin);
+    formData.append("overwriteExisting", "1");
+    formData.append("replaceFileId", file.id);
+    formData.append(
+      "fileMetadata",
+      JSON.stringify([
+        {
+          type: replacementType,
+          sku: file.sku,
+          labelSizeCode,
+          labelSize: labelSizeValue(labelSizeCode),
+          labelCategory: file.labelCategory || detectLabelCategoryFromName(replacement.name, replacementType),
+          labelVariant: file.labelVariant,
+          name: file.name,
+          originalName: replacement.name
+        }
+      ])
+    );
+    formData.append("files", replacement);
+    setSyncMessage(`Reemplazando ${file.name}...`);
+
+    try {
+      const response = await fetch("/api/files", {
+        method: "POST",
+        body: formData
+      });
+      const data = (await response.json().catch(() => ({}))) as Partial<UploadFilesResponse> & { error?: string };
+      if (!response.ok || !data.orders) throw new Error(data.error || "No se pudo reemplazar el archivo.");
+
+      setOrders(data.orders);
+      const uploadedCount = data.uploaded?.length ?? 0;
+      const rejectedSummary = summarizeRejectedFiles(data.rejected ?? []);
+      const message =
+        uploadedCount > 0
+          ? `Archivo reemplazado: ${file.name}.`
+          : `No se reemplazo el archivo${rejectedSummary ? `: ${rejectedSummary}` : "."}`;
+      setSyncMessage(message);
+      setFileUploadFeedback((current) => ({
+        ...current,
+        [orderId]: { message, tone: uploadedCount > 0 ? "success" : "error" }
+      }));
+    } catch (error) {
+      const message = uploadErrorMessage(error);
+      setSyncMessage(message);
+      setFileUploadFeedback((current) => ({
+        ...current,
+        [orderId]: { message, tone: "error" }
+      }));
+    }
+  }
+
   function updateLineCell(orderId: string, lineId: string, column: string, value: string) {
     void patchOrder(orderId, { type: "updateLineCell", lineId, column, value }, "Celda actualizada");
   }
@@ -1149,6 +1263,33 @@ export default function Home() {
     link.download = `pedidos-orvel-${todayString()}.csv`;
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadBackup() {
+    setSyncMessage("Generando backup...");
+    try {
+      const response = await fetch("/api/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: currentUser || "Operaciones", pin: currentPin })
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errorData.error || "No se pudo generar el backup.");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `flip-backup-${todayString()}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setSyncMessage("Backup descargado");
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : "No se pudo generar el backup.");
+    }
   }
 
   function toggleColumn(orderId: string, column: string) {
@@ -1544,6 +1685,10 @@ export default function Home() {
             <Download size={18} />
             Exportar
           </button>
+          <button className="ghost-button" onClick={() => void downloadBackup()} type="button">
+            <Download size={18} />
+            Backup
+          </button>
           <button className="ghost-button" onClick={resetDemoData} type="button">
             <RotateCcw size={18} />
             Reiniciar demo
@@ -1573,6 +1718,7 @@ export default function Home() {
         <TabButton active={activeTab === "importar"} icon={<Upload size={18} />} label="Importar" onClick={() => setActiveTab("importar")} />
         <TabButton active={activeTab === "historico"} icon={<Archive size={18} />} label="Historico" onClick={() => setActiveTab("historico")} />
         <TabButton active={activeTab === "catalogo"} icon={<CheckCircle2 size={18} />} label="Catalogo" onClick={() => setActiveTab("catalogo")} />
+        <TabButton active={activeTab === "biblioteca"} icon={<FolderOpen size={18} />} label="Biblioteca" onClick={() => setActiveTab("biblioteca")} />
       </nav>
 
       {activeTab === "pedidos" && (
@@ -1720,7 +1866,9 @@ export default function Home() {
 
       {activeTab === "historico" && <HistoryView orders={archivedOrders} restoreOrder={restoreOrder} />}
 
-      {activeTab === "catalogo" && <CatalogView orders={orders} />}
+      {activeTab === "catalogo" && <CatalogView deleteFile={deleteFile} orders={orders} replaceFile={replaceFile} />}
+
+      {activeTab === "biblioteca" && <FileLibraryView deleteFile={deleteFile} orders={orders} replaceFile={replaceFile} />}
 
       <ChatWidget
         chatDirectTo={chatDirectTo}
@@ -3276,7 +3424,161 @@ function HistoryView({ orders, restoreOrder }: { orders: Order[]; restoreOrder: 
   );
 }
 
-function CatalogView({ orders }: { orders: Order[] }) {
+type FileLibraryActions = {
+  deleteFile: (orderId: string, fileId: string) => void;
+  replaceFile: (orderId: string, file: LinkedFile, files: FileList | null) => void;
+};
+
+function FileLibraryView({ orders, deleteFile, replaceFile }: { orders: Order[] } & FileLibraryActions) {
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const allItems = useMemo(() => buildFileLibraryItems(orders), [orders]);
+  const filteredItems = useMemo(() => {
+    const needle = normalizeText(search);
+    return allItems.filter((item) => (!typeFilter || item.file.type === typeFilter) && (!needle || fileLibraryHaystack(item).includes(needle)));
+  }, [allItems, search, typeFilter]);
+
+  return (
+    <section className="library-panel">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">Biblioteca de recursos</p>
+          <h2>Archivos, imagenes y documentos</h2>
+        </div>
+        <span>
+          {filteredItems.length} de {allItems.length}
+        </span>
+      </div>
+      <div className="library-toolbar">
+        <div className="search-box">
+          <Search size={18} />
+          <input
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Buscar por SKU, pedido, cliente, archivo o descripcion"
+            value={search}
+          />
+        </div>
+        <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+          <option value="">Todos los tipos</option>
+          {Object.entries(fileTypeLabels).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <FileLibraryGroups deleteFile={deleteFile} emptyText="Todavia no hay archivos ligados a pedidos." items={filteredItems} replaceFile={replaceFile} />
+    </section>
+  );
+}
+
+function FileLibraryGroups({
+  items,
+  deleteFile,
+  replaceFile,
+  emptyText
+}: {
+  items: FileLibraryItem[];
+  emptyText: string;
+} & FileLibraryActions) {
+  const groups = groupFileLibraryItems(items);
+
+  if (groups.length === 0) return <p className="empty-text">{emptyText}</p>;
+
+  return (
+    <div className="library-groups">
+      {groups.map((group) => (
+        <section className="library-group" key={group.type}>
+          <div className="file-gallery-heading">
+            <strong>{group.label}</strong>
+            <span>{group.items.length}</span>
+          </div>
+          <div className="library-grid">
+            {group.items.map((item) => (
+              <FileLibraryCard
+                deleteFile={deleteFile}
+                item={item}
+                key={`${item.order.id}-${item.file.id}`}
+                replaceFile={replaceFile}
+              />
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function FileLibraryCard({ item, deleteFile, replaceFile }: { item: FileLibraryItem } & FileLibraryActions) {
+  const { file, order, line } = item;
+  const canReplace = Boolean(file.sku && file.type !== "drive");
+
+  return (
+    <article className="library-file-card">
+      <a className="library-preview" href={file.url} rel="noreferrer" target="_blank" title={file.name}>
+        {file.previewable && file.type === "imagen" ? (
+          <img alt={file.name} src={file.url} />
+        ) : file.previewable && file.type === "pdf" ? (
+          <iframe src={`${file.url}#toolbar=0&navpanes=0`} title={file.name} />
+        ) : (
+          <span>{file.type.toUpperCase()}</span>
+        )}
+      </a>
+      <div className="library-file-body">
+        <div className="library-file-title">
+          <strong>{file.name}</strong>
+          <small>
+            {order.code} - {order.customer}
+          </small>
+        </div>
+        <div className="file-meta-badges">
+          <span>{file.sku ? `SKU ${file.sku}` : "Sin SKU"}</span>
+          <span>{line?.description || "Sin descripcion"}</span>
+          <span>{fileTypeLabels[file.type]}</span>
+          <span>{file.labelSizeCode ? `${file.labelSizeCode} ${file.labelSize ?? ""}` : "Sin tamano"}</span>
+          <span>{file.labelCategory || "General"}</span>
+          <span>{file.storageStatus === "conservado" || order.archived ? "Historico" : "Temporal"}</span>
+          <span>{formatFileSize(file.size)}</span>
+        </div>
+        <div className="library-actions">
+          <a className="ghost-button compact" href={file.url} rel="noreferrer" target="_blank">
+            <ExternalLink size={14} />
+            Abrir
+          </a>
+          {canReplace && (
+            <label className="ghost-button compact file-replace-label">
+              <Upload size={14} />
+              Reemplazar
+              <input
+                accept=".nlbl,.btw,.png,.jpg,.jpeg,.webp,.gif,.pdf"
+                onChange={(event) => {
+                  void replaceFile(order.id, file, event.target.files);
+                  event.currentTarget.value = "";
+                }}
+                type="file"
+              />
+            </label>
+          )}
+          <button
+            className="danger-button compact"
+            onClick={() => {
+              if (window.confirm(`Quitar ${file.name} de ${order.code}?`)) deleteFile(order.id, file.id);
+            }}
+            type="button"
+          >
+            <Trash2 size={14} />
+            Quitar
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function CatalogView({ orders, deleteFile, replaceFile }: { orders: Order[] } & FileLibraryActions) {
+  const [productSearch, setProductSearch] = useState("");
+  const [fileSearch, setFileSearch] = useState("");
+  const [fileTypeFilter, setFileTypeFilter] = useState("");
   const products = useMemo(() => {
     const map = new Map<string, OrderLine>();
     orders.flatMap((order) => order.lines).forEach((line) => {
@@ -3284,6 +3586,17 @@ function CatalogView({ orders }: { orders: Order[] }) {
     });
     return Array.from(map.values()).sort((a, b) => a.sku.localeCompare(b.sku));
   }, [orders]);
+  const filteredProducts = useMemo(() => {
+    const needle = normalizeText(productSearch);
+    return products.filter((product) => !needle || normalizeText(`${product.sku} ${product.description}`).includes(needle));
+  }, [productSearch, products]);
+  const storedItems = useMemo(() => buildFileLibraryItems(orders).filter(isStoredCatalogItem), [orders]);
+  const filteredStoredItems = useMemo(() => {
+    const needle = normalizeText(fileSearch);
+    return storedItems.filter(
+      (item) => (!fileTypeFilter || item.file.type === fileTypeFilter) && (!needle || fileLibraryHaystack(item).includes(needle))
+    );
+  }, [fileSearch, fileTypeFilter, storedItems]);
 
   return (
     <section className="catalog-panel">
@@ -3292,7 +3605,19 @@ function CatalogView({ orders }: { orders: Order[] }) {
           <p className="eyebrow">Master data inicial</p>
           <h2>Catalogo SKU detectado</h2>
         </div>
-        <span>{products.length} SKUs</span>
+        <span>
+          {filteredProducts.length} de {products.length} SKUs
+        </span>
+      </div>
+      <div className="catalog-toolbar">
+        <div className="search-box">
+          <Search size={18} />
+          <input
+            onChange={(event) => setProductSearch(event.target.value)}
+            placeholder="Buscar SKU o descripcion"
+            value={productSearch}
+          />
+        </div>
       </div>
       <div className="table-wrap">
         <table>
@@ -3309,7 +3634,7 @@ function CatalogView({ orders }: { orders: Order[] }) {
             </tr>
           </thead>
           <tbody>
-            {products.map((product) => (
+            {filteredProducts.map((product) => (
               <tr key={product.id}>
                 <td>{product.sku}</td>
                 <td>{product.description}</td>
@@ -3324,6 +3649,41 @@ function CatalogView({ orders }: { orders: Order[] }) {
           </tbody>
         </table>
       </div>
+      <section className="catalog-files-panel">
+        <div className="section-title">
+          <div>
+            <p className="eyebrow">Recursos almacenados</p>
+            <h3>Archivos historicos y cargados</h3>
+          </div>
+          <span>
+            {filteredStoredItems.length} de {storedItems.length}
+          </span>
+        </div>
+        <div className="library-toolbar">
+          <div className="search-box">
+            <Search size={18} />
+            <input
+              onChange={(event) => setFileSearch(event.target.value)}
+              placeholder="Buscar archivo por SKU, pedido, cliente, tipo o descripcion"
+              value={fileSearch}
+            />
+          </div>
+          <select value={fileTypeFilter} onChange={(event) => setFileTypeFilter(event.target.value)}>
+            <option value="">Todos los tipos</option>
+            {Object.entries(fileTypeLabels).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <FileLibraryGroups
+          deleteFile={deleteFile}
+          emptyText="Todavia no hay archivos almacenados en catalogo."
+          items={filteredStoredItems}
+          replaceFile={replaceFile}
+        />
+      </section>
     </section>
   );
 }

@@ -322,7 +322,8 @@ button:disabled {
 .calendar-panel,
 .import-panel,
 .history-archive,
-.catalog-panel {
+.catalog-panel,
+.library-panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1370,6 +1371,122 @@ tr:last-child td {
   gap: 10px;
 }
 
+.library-toolbar,
+.catalog-toolbar {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(280px, 1fr) 220px;
+  margin-bottom: 14px;
+}
+
+.catalog-toolbar {
+  grid-template-columns: minmax(280px, 1fr);
+}
+
+.library-toolbar select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: 44px;
+  padding: 9px 11px;
+  width: 100%;
+}
+
+.library-groups {
+  display: grid;
+  gap: 18px;
+}
+
+.library-group {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.library-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+}
+
+.library-file-card {
+  background: #f8fbf9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-rows: 180px auto;
+  min-width: 0;
+  padding: 10px;
+}
+
+.library-preview {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e6eee8;
+  border-radius: 8px;
+  color: var(--teal);
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
+  text-decoration: none;
+}
+
+.library-preview img,
+.library-preview iframe {
+  border: 0;
+  height: 100%;
+  width: 100%;
+}
+
+.library-preview img {
+  object-fit: contain;
+}
+
+.library-preview span {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.library-file-body {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.library-file-title strong,
+.library-file-title small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.library-file-title small {
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.library-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.file-replace-label {
+  cursor: pointer;
+  position: relative;
+}
+
+.file-replace-label input {
+  display: none;
+}
+
+.catalog-files-panel {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 18px;
+}
+
 .chat-fab {
   align-items: center;
   background: var(--teal);
@@ -1918,7 +2035,8 @@ tr:last-child td {
 .calendar-panel,
 .import-panel,
 .history-archive,
-.catalog-panel {
+.catalog-panel,
+.library-panel {
   margin: 0 auto;
   max-width: 1760px;
   overflow-x: auto;
@@ -2169,6 +2287,7 @@ dd {
   .side-stack,
   .add-line-form,
   .line-filter-bar,
+  .library-toolbar,
   .print-controls,
   .process-dashboard,
   .capacity-config,

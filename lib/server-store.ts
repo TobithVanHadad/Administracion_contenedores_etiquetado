@@ -892,7 +892,12 @@ export async function patchOrder(
   });
 }
 
-export async function addFilesToOrder(orderId: string, files: LinkedFile[], auth: AuthPayload, options: { overwriteExisting?: boolean } = {}) {
+export async function addFilesToOrder(
+  orderId: string,
+  files: LinkedFile[],
+  auth: AuthPayload,
+  options: { overwriteExisting?: boolean; replaceFileId?: string } = {}
+) {
   const user = await authenticate(auth, "addFiles");
   let removedFiles: LinkedFile[] = [];
 
@@ -902,9 +907,11 @@ export async function addFilesToOrder(orderId: string, files: LinkedFile[], auth
     if (!row) throw new Error("Pedido no encontrado.");
 
     const order = rowToOrder(row);
-    removedFiles = options.overwriteExisting
-      ? order.files.filter((file) => files.some((incoming) => fileMatchesReplacement(file, incoming)))
-      : [];
+    removedFiles = options.replaceFileId
+      ? order.files.filter((file) => file.id === options.replaceFileId)
+      : options.overwriteExisting
+        ? order.files.filter((file) => files.some((incoming) => fileMatchesReplacement(file, incoming)))
+        : [];
 
     const nextOrder = normalizeOrder({
       ...order,

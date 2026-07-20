@@ -125,6 +125,7 @@ export async function POST(request: NextRequest) {
     const user = String(formData.get("user") || "");
     const pin = String(formData.get("pin") || "");
     const overwriteExisting = String(formData.get("overwriteExisting") || "") === "1";
+    const replaceFileId = String(formData.get("replaceFileId") || "");
     const uploadedFiles = formData.getAll("files").filter((file): file is File => file instanceof File);
     const metadataList = parseFileMetadata(formData);
 
@@ -198,7 +199,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ orders, uploaded: [], rejected: rejectedFiles });
     }
 
-    const { orders: updatedOrders, removedFiles } = await addFilesToOrder(orderId, linkedFiles, { user, pin }, { overwriteExisting });
+    const { orders: updatedOrders, removedFiles } = await addFilesToOrder(orderId, linkedFiles, { user, pin }, { overwriteExisting, replaceFileId });
     for (const removedFile of removedFiles) {
       if (removedFile.storedName && (!removedFile.sourceOrderId || removedFile.sourceOrderId === orderId)) {
         await unlink(path.join(uploadDir, orderId, removedFile.storedName)).catch(() => undefined);
