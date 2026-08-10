@@ -50,6 +50,12 @@ function cleanText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function metadataSyncSource(value: unknown): LinkedFile["syncSource"] {
+  return value === "folder_upload" || value === "desktop_sync" || value === "drive_link" || value === "manual_upload"
+    ? value
+    : undefined;
+}
+
 function parseFileMetadata(formData: FormData) {
   const raw = formData.get("fileMetadata");
   if (typeof raw !== "string" || !raw.trim()) return [];
@@ -152,9 +158,14 @@ export async function POST(request: NextRequest) {
       const id = uid("file");
       const storedName = `${id}-${safeName(file.name)}`;
       const metadataSku = cleanText(metadata.sku);
-      const detectedSku = metadataSku && skus.includes(metadataSku) ? metadataSku : detectSku(file.name, skus);
+      const relativePath = cleanText(metadata.relativePath);
+      const folderName = cleanText(metadata.folderName);
+      const folderPath = cleanText(metadata.folderPath);
+      const localPath = cleanText(metadata.localPath);
+      const detectionText = [file.name, relativePath, localPath].filter(Boolean).join(" ");
+      const detectedSku = metadataSku && skus.includes(metadataSku) ? metadataSku : detectSku(detectionText, skus);
       const line = detectedSku ? order.lines.find((candidate) => candidate.sku === detectedSku) : undefined;
-      const detectedLabelSize = detectLabelSize(file.name);
+      const detectedLabelSize = detectLabelSize(detectionText || file.name);
       const metadataLabelSizeCode = cleanText(metadata.labelSizeCode).toUpperCase();
       const labelSizeCode = metadataLabelSizeCode || detectedLabelSize?.code;
       const labelSize = labelSizeCode ? labelSizeCatalog[labelSizeCode] || cleanText(metadata.labelSize) : detectedLabelSize?.size;
@@ -163,6 +174,7 @@ export async function POST(request: NextRequest) {
       const displayName = cleanText(metadata.name) || file.name;
       const originalName = cleanText(metadata.originalName) || file.name;
       const fileType = metadataFileType(metadata.type) ?? fileTypeFromExtension(extension);
+      const syncSource = metadataSyncSource(metadata.syncSource);
 
       if (!detectedSku || !line) {
         rejectedFiles.push({ name: file.name, reason: "Sin coincidencia de SKU en el pedido." });
@@ -191,7 +203,12 @@ export async function POST(request: NextRequest) {
         mimeType: contentTypeFor(extension, file.type),
         size: file.size,
         previewable: isPreviewable(extension),
-        storageStatus: "temporal"
+        storageStatus: "temporal",
+        syncSource: syncSource || "manual_upload",
+        folderPath: folderPath || undefined,
+        folderName: folderName || undefined,
+        relativePath: relativePath || undefined,
+        localPath: localPath || undefined
       });
     }
 

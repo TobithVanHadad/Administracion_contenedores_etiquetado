@@ -1,0 +1,12 @@
+{
+  "serverUrl": "https://administracioncontenedoresetiquetado-production.up.railway.app",
+  "user": "Gloria",
+  "pin": "1002",
+  "overwriteExisting": false,
+  "orders": [
+    {
+      "orderCode": "EUROPA 17",
+      "folderPath": "C:\\Etiquetas\\EUROPA 17"
+    }
+  ]
+}

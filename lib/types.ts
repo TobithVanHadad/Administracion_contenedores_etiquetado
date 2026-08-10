@@ -22,6 +22,8 @@ export type LineColor = "sin_color" | "rojo" | "amarillo" | "azul" | "verde";
 
 export type FileStorageStatus = "temporal" | "conservado";
 
+export type LinkedFileSyncSource = "manual_upload" | "folder_upload" | "desktop_sync" | "drive_link";
+
 export type UserRole = "admin" | "planning" | "planning_warehouse" | "planeacion" | "etiquetado" | "aprobador" | "consulta";
 
 export type OrderDestination = "mexico" | "usa" | "europa" | "otro";
@@ -116,6 +118,11 @@ export type LinkedFile = {
   size?: number;
   previewable?: boolean;
   storageStatus?: FileStorageStatus;
+  syncSource?: LinkedFileSyncSource;
+  folderPath?: string;
+  folderName?: string;
+  relativePath?: string;
+  localPath?: string;
   addedAt?: string;
   updatedAt?: string;
   preservedAt?: string;
@@ -145,6 +152,8 @@ export type Order = {
   archived: boolean;
   progress: number;
   notes?: string;
+  labelFolderPath?: string;
+  labelFolderUpdatedAt?: string;
   planningConfig?: PlanningConfig;
   columns?: string[];
   lines: OrderLine[];

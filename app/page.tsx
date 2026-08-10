@@ -252,6 +252,12 @@ type UploadCandidate = {
   labelCategory?: string;
 };
 
+type UploadFilesOptions = {
+  syncSource?: LinkedFile["syncSource"];
+  folderName?: string;
+  folderPath?: string;
+};
+
 type FileLibraryItem = {
   order: Order;
   file: LinkedFile;
@@ -655,6 +661,24 @@ function labelSizeValue(code?: string) {
   return labelSizes.find((size) => size.code === code)?.size;
 }
 
+function relativePathForFile(file: File) {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || "";
+}
+
+function rootFolderFromRelativePath(relativePath: string) {
+  return relativePath.split(/[\\/]/).filter(Boolean)[0] ?? "";
+}
+
+function rootFolderFromFileList(files: FileList | null) {
+  const firstFile = files?.[0];
+  return firstFile ? rootFolderFromRelativePath(relativePathForFile(firstFile)) : "";
+}
+
+function uploadCandidateSearchName(file: File) {
+  const relativePath = relativePathForFile(file);
+  return relativePath ? `${file.name} ${relativePath}` : file.name;
+}
+
 function detectLabelCategoryFromName(name: string, type: FileType) {
   const normalized = normalizeText(name);
   if (normalized.includes("caja") || normalized.includes("case") || normalized.includes("carton")) return "Caja";
@@ -669,16 +693,17 @@ function detectLabelCategoryFromName(name: string, type: FileType) {
 function buildUploadCandidate(file: File, order: Order): UploadCandidate {
   const type = fileTypeFromName(file.name);
   const skus = order.lines.map((line) => line.sku).sort((a, b) => b.length - a.length);
-  const normalizedName = normalizeText(file.name);
+  const searchName = uploadCandidateSearchName(file);
+  const normalizedName = normalizeText(searchName);
   const sku = skus.find((candidate) => candidate && normalizedName.includes(normalizeText(candidate)));
-  const labelSizeCode = detectLabelSizeCodeFromName(file.name);
+  const labelSizeCode = detectLabelSizeCodeFromName(searchName);
 
   return {
     file,
     sku,
     type,
     labelSizeCode,
-    labelCategory: detectLabelCategoryFromName(file.name, type)
+    labelCategory: detectLabelCategoryFromName(searchName, type)
   };
 }
 
@@ -713,6 +738,10 @@ function fileLibraryHaystack(item: FileLibraryItem) {
       item.file.labelCategory,
       item.file.labelVariant,
       item.file.labelSizeCode,
+      item.file.folderName,
+      item.file.folderPath,
+      item.file.relativePath,
+      item.file.localPath,
       item.order.code,
       item.order.customer,
       item.line?.description
@@ -1329,7 +1358,7 @@ export default function Home() {
     setFileDraft(defaultFileDraft);
   }
 
-  async function uploadFiles(orderId: string, files: FileList | null) {
+  async function uploadFiles(orderId: string, files: FileList | null, options: UploadFilesOptions = {}) {
     if (!files || files.length === 0) {
       setFileUploadFeedback((current) => ({
         ...current,
@@ -1352,6 +1381,9 @@ export default function Home() {
     const matchedByName = uploadCandidates.filter((candidate) => candidate.sku).length;
     const duplicateCandidates = uploadCandidates.filter((candidate) => order.files.some((file) => fileMatchesUploadCandidate(file, candidate)));
     const candidateByFile = new Map(uploadCandidates.map((candidate) => [candidate.file, candidate]));
+    const isFolderUpload = options.syncSource === "folder_upload" || selectedFiles.some((file) => relativePathForFile(file));
+    const folderName = options.folderName || rootFolderFromRelativePath(relativePathForFile(selectedFiles[0])) || "Carpeta seleccionada";
+    const folderPath = options.folderPath || folderName;
     const overwriteExisting =
       order.destination !== "usa" && duplicateCandidates.length > 0
         ? window.confirm(
@@ -1367,8 +1399,8 @@ export default function Home() {
       [orderId]: {
         message:
           matchedByName === 0
-            ? "Subiendo archivos. No detecte SKU en el nombre; si no coincide con el pedido, se descartara."
-            : `Subiendo ${selectedFiles.length} archivo(s) en ${batches.length} lote(s). Detecte ${matchedByName} posible(s) coincidencia(s) por SKU.`,
+            ? `${isFolderUpload ? `Subiendo carpeta ${folderName}. ` : "Subiendo archivos. "}No detecte SKU en el nombre o ruta; si no coincide con el pedido, se descartara.`
+            : `Subiendo ${isFolderUpload ? `carpeta ${folderName}` : `${selectedFiles.length} archivo(s)`} en ${batches.length} lote(s). Detecte ${matchedByName} posible(s) coincidencia(s) por SKU.`,
         tone: matchedByName === 0 ? "warning" : "neutral"
       }
     }));
@@ -1390,12 +1422,17 @@ export default function Home() {
           JSON.stringify(
             batch.map((file) => {
               const candidate = candidateByFile.get(file);
+              const relativePath = relativePathForFile(file);
               return {
                 type: candidate?.type,
                 sku: candidate?.sku,
                 labelSizeCode: candidate?.labelSizeCode,
                 labelSize: labelSizeValue(candidate?.labelSizeCode),
-                labelCategory: candidate?.labelCategory
+                labelCategory: candidate?.labelCategory,
+                syncSource: options.syncSource || (relativePath ? "folder_upload" : "manual_upload"),
+                folderName,
+                folderPath,
+                relativePath
               };
             })
           )
@@ -2092,7 +2129,7 @@ function OrderDetail({
   updateOrderField: <K extends keyof Order>(orderId: string, field: K, value: Order[K], label: string) => void;
   updateLineColor: (orderId: string, lineId: string, color: LineColor) => void;
   closeOrder: (orderId: string) => void;
-  uploadFiles: (orderId: string, files: FileList | null) => void;
+  uploadFiles: (orderId: string, files: FileList | null, options?: UploadFilesOptions) => void;
   fileDraft: FileDraft;
   fileUploadFeedback?: UploadFeedback;
   canClearFiles: boolean;
@@ -2129,6 +2166,7 @@ function OrderDetail({
   const [requirementDrafts, setRequirementDrafts] = useState<Record<string, RequirementDraft>>({});
   const [resourceSourceId, setResourceSourceId] = useState("same_customer");
   const [clearFilesConfirm, setClearFilesConfirm] = useState("");
+  const [labelFolderDraft, setLabelFolderDraft] = useState(order.labelFolderPath ?? "");
   const allColumns = order.columns?.length ? order.columns : defaultOrderColumns;
   const visibleColumns = allColumns.filter((column) => !hiddenColumns.includes(column));
   const allTableColumns: TableColumnDef[] = [
@@ -2161,6 +2199,10 @@ function OrderDetail({
       )
       .sort((a, b) => compareLinesBySort(a, b, lineSort));
   }, [lineSort, order.lines, showHiddenLines, skuSearch, warehouseFilter]);
+
+  useEffect(() => {
+    setLabelFolderDraft(order.labelFolderPath ?? "");
+  }, [order.id, order.labelFolderPath]);
 
   function handleAddLine() {
     if (!lineDraft.sku.trim()) return;
@@ -2238,6 +2280,24 @@ function OrderDetail({
       size: labelSize.size
     });
     updateRequirementDraft(line.id, { quantity: "1" });
+  }
+
+  function saveLabelFolderPath(nextPath = labelFolderDraft) {
+    const cleanPath = nextPath.trim();
+    if (cleanPath === (order.labelFolderPath ?? "")) return;
+    updateOrderField(order.id, "labelFolderPath", cleanPath, cleanPath ? `Carpeta de etiquetas asignada: ${cleanPath}.` : "Carpeta de etiquetas eliminada.");
+    updateOrderField(order.id, "labelFolderUpdatedAt", new Date().toISOString(), "Fecha de carpeta de etiquetas actualizada.");
+  }
+
+  function handleFolderUpload(files: FileList | null) {
+    const folderName = rootFolderFromFileList(files);
+    const folderPath = labelFolderDraft.trim() || folderName;
+    if (folderPath && folderPath !== (order.labelFolderPath ?? "")) {
+      setLabelFolderDraft(folderPath);
+      updateOrderField(order.id, "labelFolderPath", folderPath, `Carpeta de etiquetas asignada: ${folderPath}.`);
+      updateOrderField(order.id, "labelFolderUpdatedAt", new Date().toISOString(), "Fecha de carpeta de etiquetas actualizada.");
+    }
+    void uploadFiles(order.id, files, { syncSource: "folder_upload", folderName, folderPath });
   }
 
   return (
@@ -2910,6 +2970,46 @@ function OrderDetail({
               <h3>Archivos relacionados</h3>
               <span>{order.files.length}</span>
             </div>
+            <div className="folder-sync-panel">
+              <div>
+                <strong>Carpeta de etiquetas del pedido</strong>
+                <small>
+                  Guarda la carpeta de referencia y permite seleccionar una carpeta completa para detectar archivos por SKU.
+                </small>
+              </div>
+              <label>
+                Ruta o nombre de carpeta
+                <input
+                  onBlur={() => saveLabelFolderPath()}
+                  onChange={(event) => setLabelFolderDraft(event.target.value)}
+                  placeholder="Ej. C:\\Etiquetas\\EUROPA 17 o carpeta compartida"
+                  value={labelFolderDraft}
+                />
+              </label>
+              <div className="folder-sync-actions">
+                <button className="ghost-button compact" onClick={() => saveLabelFolderPath()} type="button">
+                  <FolderOpen size={16} />
+                  Guardar carpeta
+                </button>
+                <label className="primary-button compact folder-upload-button">
+                  <Upload size={16} />
+                  Seleccionar carpeta y subir
+                  <input
+                    accept=".nlbl,.btw,.png,.jpg,.jpeg,.webp,.gif,.pdf"
+                    multiple
+                    onChange={(event) => {
+                      handleFolderUpload(event.target.files);
+                      event.target.value = "";
+                    }}
+                    type="file"
+                    {...{ directory: "", webkitdirectory: "" }}
+                  />
+                </label>
+              </div>
+              <p>
+                En navegador no se puede leer la ruta absoluta por seguridad. El conector de escritorio usara esta misma carpeta para sincronizarla despues.
+              </p>
+            </div>
             <label className="upload-drop">
               <Paperclip size={18} />
               Subir archivos .nlbl, .btw, imagenes o PDF
@@ -3019,6 +3119,8 @@ function OrderDetail({
                     <span>{file.sku ? `SKU ${file.sku}` : "Sin SKU"}</span>
                     <span>{file.labelSizeCode ? `${file.labelSizeCode} ${file.labelSize ?? ""}` : "Sin tamano"}</span>
                     <span>{file.labelCategory || "General"}</span>
+                    {file.folderName && <span>Carpeta {file.folderName}</span>}
+                    {file.relativePath && <span>{file.relativePath}</span>}
                     {file.sourceOrderCode && <span>Origen {file.sourceOrderCode}</span>}
                     <span>{formatFileSize(file.size)}</span>
                   </div>
@@ -3537,6 +3639,8 @@ function FileLibraryCard({ item, deleteFile, replaceFile }: { item: FileLibraryI
           <span>{fileTypeLabels[file.type]}</span>
           <span>{file.labelSizeCode ? `${file.labelSizeCode} ${file.labelSize ?? ""}` : "Sin tamano"}</span>
           <span>{file.labelCategory || "General"}</span>
+          {file.folderName && <span>Carpeta {file.folderName}</span>}
+          {file.relativePath && <span>{file.relativePath}</span>}
           <span>{file.storageStatus === "conservado" || order.archived ? "Historico" : "Temporal"}</span>
           <span>{formatFileSize(file.size)}</span>
         </div>

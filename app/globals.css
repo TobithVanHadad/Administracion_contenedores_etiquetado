@@ -1227,6 +1227,54 @@ tr:last-child td {
   width: 100%;
 }
 
+.folder-sync-panel {
+  background: #f8fbf9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.folder-sync-panel strong,
+.folder-sync-panel small,
+.folder-sync-panel p {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.folder-sync-panel small,
+.folder-sync-panel p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 2px 0 0;
+}
+
+.folder-sync-panel label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 6px;
+}
+
+.folder-sync-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.folder-upload-button {
+  cursor: pointer;
+  position: relative;
+}
+
+.folder-upload-button input {
+  display: none;
+}
+
 .danger-zone {
   background: #fff8f8;
   border: 1px solid #f0caca;
@@ -2288,6 +2336,7 @@ dd {
   .add-line-form,
   .line-filter-bar,
   .library-toolbar,
+  .folder-sync-actions,
   .print-controls,
   .process-dashboard,
   .capacity-config,
