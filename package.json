@@ -12,7 +12,9 @@
     "lint": "next lint",
     "migrate:railway": "node scripts/migrate-local-to-railway.mjs",
     "restore:railway": "node scripts/restore-backup-to-railway.mjs",
-    "sync:folders": "node tools/flip-sync-agent/sync-folder.mjs"
+    "sync:folders": "node tools/flip-sync-agent/sync-folder.mjs",
+    "desktop:run": "powershell -ExecutionPolicy Bypass -File tools\\flip-sync-desktop\\FlipSyncDesktop.ps1",
+    "desktop:build": "powershell -ExecutionPolicy Bypass -File tools\\flip-sync-desktop\\build-exe.ps1"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",

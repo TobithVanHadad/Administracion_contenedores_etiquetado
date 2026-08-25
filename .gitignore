@@ -12,3 +12,4 @@ data/*.sqlite-*
 respaldo/
 respaldo_sqlite/
 *.tsbuildinfo
+tools/flip-sync-desktop/dist/
