@@ -7,12 +7,15 @@ import { dataDir, ensurePersistentStorage } from "./storage";
 import { buildEvent, calculateLineProgress, lineColorLabels, normalizeOrder, statusFromLineProgress, uid } from "./order-utils";
 import {
   AppUser,
+  ImportPreviewRow,
   LabelDevelopmentStatus,
   LabelRequirement,
   LinkedFile,
   LineColor,
   Order,
+  OrderDestination,
   OrderLine,
+  Priority,
   PrintRecord,
   UserRole,
   WarehouseLabelingStatus,
@@ -34,6 +37,35 @@ type StoredUser = AppUser & {
 type FileUpdate = Partial<
   Pick<LinkedFile, "type" | "name" | "sku" | "labelSizeCode" | "labelSize" | "labelCategory" | "labelVariant">
 >;
+
+export type ImportedWorkbookSheet = {
+  sheetName: string;
+  rows: ImportPreviewRow[];
+  headerRow?: number;
+  headers?: string[];
+};
+
+export type WorkbookSyncSummaryItem = {
+  sheetName: string;
+  orderCode: string;
+  status: "created" | "updated" | "skipped";
+  rows: number;
+  createdLines: number;
+  updatedLines: number;
+  keptMissingLines: number;
+  removedLines: number;
+  reason?: string;
+};
+
+export type WorkbookSyncOptions = {
+  sourceName?: string;
+  defaultCustomer?: string;
+  defaultOwner?: string;
+  defaultDestination?: OrderDestination;
+  defaultPriority?: Priority;
+  defaultDispatchDate?: string;
+  removeMissingLines?: boolean;
+};
 
 let db: DatabaseSync | undefined;
 let writeQueue = Promise.resolve();
@@ -321,6 +353,10 @@ function can(role: UserRole, action: string, field?: keyof Order) {
     return isPlanning;
   }
 
+  if (action === "syncWorkbook") {
+    return isPlanning;
+  }
+
   if (action === "addFile") {
     return isPlanning || role === "etiquetado" || role === "aprobador";
   }
@@ -459,6 +495,316 @@ export async function readUsersPublic() {
 export async function readOrders() {
   const database = await openDb();
   return readOrdersFromDatabase(database);
+}
+
+function cleanImportText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function normalizeImportKey(value: unknown) {
+  return cleanImportText(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function todayString() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function normalizeWorkbookDate(value?: string) {
+  const clean = cleanImportText(value);
+  return clean ? clean.slice(0, 10) : "";
+}
+
+function inferDestinationFromSheet(sheetName: string, fallback: OrderDestination): OrderDestination {
+  const normalized = normalizeImportKey(sheetName);
+  if (normalized.includes("usa") || normalized.includes("estados unidos") || normalized.includes("united states")) return "usa";
+  if (normalized.includes("europa") || normalized.includes("europe")) return "europa";
+  if (normalized.includes("mexico") || normalized.includes("mx")) return "mexico";
+  return fallback;
+}
+
+function isMissingLabelValue(value?: string) {
+  const normalized = normalizeImportKey(value);
+  return (
+    !normalized ||
+    normalized === "n/a" ||
+    normalized === "na" ||
+    normalized === "#n/a" ||
+    normalized.includes("error") ||
+    normalized.includes("#ref")
+  );
+}
+
+function makeLineBuckets(lines: OrderLine[], selector: (line: OrderLine) => string | undefined) {
+  const buckets = new Map<string, OrderLine[]>();
+
+  for (const line of lines) {
+    const key = normalizeImportKey(selector(line));
+    if (!key) continue;
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(line);
+    buckets.set(key, bucket);
+  }
+
+  return buckets;
+}
+
+function shiftBucket(buckets: Map<string, OrderLine[]>, key: string) {
+  const bucket = buckets.get(key);
+  if (!bucket?.length) return undefined;
+  return bucket.shift();
+}
+
+function takeMatchingLine(row: ImportPreviewRow, skuBuckets: Map<string, OrderLine[]>, descriptionBuckets: Map<string, OrderLine[]>) {
+  const skuMatch = shiftBucket(skuBuckets, normalizeImportKey(row.sku));
+  if (skuMatch) return skuMatch;
+
+  return shiftBucket(descriptionBuckets, normalizeImportKey(row.description));
+}
+
+function valueOrPrevious<T>(nextValue: T | undefined, previousValue: T | undefined) {
+  return nextValue !== undefined ? nextValue : previousValue;
+}
+
+function lineFromImportRow(row: ImportPreviewRow, index: number, existingLine?: OrderLine): OrderLine {
+  const sku = cleanImportText(row.sku || existingLine?.sku || `SIN-SKU-${index + 1}`);
+  const description = cleanImportText(row.description || existingLine?.description || "Sin descripcion");
+
+  return {
+    id: existingLine?.id ?? uid("line"),
+    sku,
+    description,
+    quantity: valueOrPrevious(row.quantity, existingLine?.quantity) ?? 0,
+    originalData: row.originalData ?? existingLine?.originalData ?? {},
+    lineColor: existingLine?.lineColor ?? "rojo",
+    hidden: existingLine?.hidden ?? false,
+    warehouseStatus: existingLine?.warehouseStatus ?? "nothing_requested",
+    labelDevelopmentStatus: existingLine?.labelDevelopmentStatus ?? "no_ha_llegado",
+    warehouseLabelingStatus: existingLine?.warehouseLabelingStatus ?? "no_iniciado",
+    labelRequirements: existingLine?.labelRequirements ?? [],
+    printHistory: existingLine?.printHistory ?? [],
+    piecesPerCase: valueOrPrevious(row.piecesPerCase, existingLine?.piecesPerCase),
+    labelCode: valueOrPrevious(row.labelCode, existingLine?.labelCode),
+    caseLabelCode: valueOrPrevious(row.caseLabelCode, existingLine?.caseLabelCode),
+    expirationDate: valueOrPrevious(row.expirationDate, existingLine?.expirationDate),
+    weightKg: valueOrPrevious(row.weightKg, existingLine?.weightKg),
+    volumeM3: valueOrPrevious(row.volumeM3, existingLine?.volumeM3),
+    satCode: valueOrPrevious(row.satCode, existingLine?.satCode),
+    taricCode: valueOrPrevious(row.taricCode, existingLine?.taricCode),
+    comments: valueOrPrevious(row.comments, existingLine?.comments)
+  };
+}
+
+function relinkFilesToLines(files: LinkedFile[], lines: OrderLine[]) {
+  const linesBySku = new Map(lines.map((line) => [normalizeImportKey(line.sku), line]));
+
+  return files.map((file) => {
+    const line = file.sku ? linesBySku.get(normalizeImportKey(file.sku)) : undefined;
+    return {
+      ...file,
+      lineId: line?.id
+    };
+  });
+}
+
+function uniqueColumns(existingColumns: string[] = [], importedColumns: string[] = [], lines: OrderLine[] = []) {
+  return Array.from(
+    new Set(
+      [
+        ...existingColumns,
+        ...importedColumns,
+        ...lines.flatMap((line) => Object.keys(line.originalData ?? {}))
+      ].filter(Boolean)
+    )
+  );
+}
+
+function importedSheetColumns(sheet: ImportedWorkbookSheet, rows: ImportPreviewRow[]) {
+  return sheet.headers?.filter(Boolean) ?? rows.find((row) => row.sourceColumns?.length)?.sourceColumns ?? [];
+}
+
+export async function syncImportedWorkbook(sheets: ImportedWorkbookSheet[], auth: AuthPayload, options: WorkbookSyncOptions = {}) {
+  const user = await authenticate(auth, "syncWorkbook");
+  const summary: WorkbookSyncSummaryItem[] = [];
+  const sourceName = cleanImportText(options.sourceName) || "workbook";
+  const defaultCustomer = cleanImportText(options.defaultCustomer) || "CREVEL";
+  const defaultOwner = cleanImportText(options.defaultOwner) || "Operaciones MX";
+  const defaultDestination = options.defaultDestination ?? "mexico";
+  const defaultPriority = options.defaultPriority ?? "media";
+  const defaultDispatchDate = normalizeWorkbookDate(options.defaultDispatchDate) || todayString();
+
+  const orders = await withWrite(async () => {
+    const database = await openDb();
+    const existingOrders = readOrdersFromDatabase(database);
+    const ordersByCode = new Map(existingOrders.map((order) => [normalizeImportKey(order.code), order]));
+
+    for (const sheet of sheets) {
+      const orderCode = cleanImportText(sheet.sheetName);
+      const meaningfulRows = sheet.rows.filter((row) => row.sku && row.description);
+      const usableRows = meaningfulRows.length ? sheet.rows.filter((row) => row.sku || row.description) : [];
+
+      if (!orderCode) {
+        summary.push({
+          sheetName: sheet.sheetName,
+          orderCode: "",
+          status: "skipped",
+          rows: 0,
+          createdLines: 0,
+          updatedLines: 0,
+          keptMissingLines: 0,
+          removedLines: 0,
+          reason: "Hoja sin nombre."
+        });
+        continue;
+      }
+
+      if (!usableRows.length) {
+        summary.push({
+          sheetName: sheet.sheetName,
+          orderCode,
+          status: "skipped",
+          rows: 0,
+          createdLines: 0,
+          updatedLines: 0,
+          keptMissingLines: 0,
+          removedLines: 0,
+          reason: "Sin lineas con SKU o descripcion."
+        });
+        continue;
+      }
+
+      const existingOrder = ordersByCode.get(normalizeImportKey(orderCode));
+      const first = usableRows.find((row) => row.sku || row.description);
+      const skuBuckets = makeLineBuckets(existingOrder?.lines ?? [], (line) => line.sku);
+      const descriptionBuckets = makeLineBuckets(existingOrder?.lines ?? [], (line) => line.description);
+      const matchedLineIds = new Set<string>();
+      let createdLines = 0;
+      let updatedLines = 0;
+
+      const importedLines = usableRows.map((row, index) => {
+        const existingLine = existingOrder ? takeMatchingLine(row, skuBuckets, descriptionBuckets) : undefined;
+        if (existingLine) {
+          matchedLineIds.add(existingLine.id);
+          updatedLines += 1;
+        } else {
+          createdLines += 1;
+        }
+
+        return lineFromImportRow(row, index, existingLine);
+      });
+
+      const missingExistingLines = existingOrder?.lines.filter((line) => !matchedLineIds.has(line.id)) ?? [];
+      const keptMissingLines = options.removeMissingLines ? 0 : missingExistingLines.length;
+      const removedLines = options.removeMissingLines ? missingExistingLines.length : 0;
+      const lines = options.removeMissingLines ? importedLines : [...importedLines, ...missingExistingLines];
+      const importedColumns = importedSheetColumns(sheet, usableRows);
+      const dispatchFromWorkbook = normalizeWorkbookDate(first?.fechaDespacho);
+      const priorityFromWorkbook = first?.prioridad;
+      const destination = existingOrder?.destination ?? inferDestinationFromSheet(orderCode, defaultDestination);
+      const customer = cleanImportText(first?.cliente) || existingOrder?.customer || defaultCustomer;
+      const owner = cleanImportText(first?.responsable) || existingOrder?.owner || defaultOwner;
+      const priority = priorityFromWorkbook || existingOrder?.priority || defaultPriority;
+      const dispatchDate = dispatchFromWorkbook || existingOrder?.dispatchDate || defaultDispatchDate;
+
+      if (existingOrder) {
+        const lineProgress = calculateLineProgress(lines);
+        const statusUpdate = statusFromLineProgress(existingOrder, lineProgress.progress);
+        const nextOrder = normalizeOrder({
+          ...existingOrder,
+          code: orderCode,
+          customer,
+          owner,
+          destination,
+          priority,
+          dispatchDate,
+          ...statusUpdate,
+          columns: uniqueColumns(existingOrder.columns, importedColumns, lines),
+          lines,
+          files: relinkFilesToLines(existingOrder.files, lines),
+          history: [
+            buildEvent(
+              "excel sync",
+              `Sincronizado desde ${sourceName} / ${sheet.sheetName}: ${usableRows.length} linea(s), ${createdLines} nueva(s), ${updatedLines} actualizada(s)${
+                keptMissingLines ? `, ${keptMissingLines} conservada(s) aunque ya no estan en Excel` : ""
+              }${removedLines ? `, ${removedLines} eliminada(s) porque ya no estan en Excel` : ""}.`,
+              user.name
+            ),
+            ...existingOrder.history
+          ]
+        });
+
+        saveOrder(nextOrder);
+        ordersByCode.set(normalizeImportKey(orderCode), nextOrder);
+        summary.push({
+          sheetName: sheet.sheetName,
+          orderCode,
+          status: "updated",
+          rows: usableRows.length,
+          createdLines,
+          updatedLines,
+          keptMissingLines,
+          removedLines
+        });
+        continue;
+      }
+
+      const missingLabels = importedLines.some((line) => isMissingLabelValue(line.labelCode) || isMissingLabelValue(line.caseLabelCode));
+      const newOrder = normalizeOrder({
+        id: uid("ord"),
+        code: orderCode,
+        customer,
+        owner,
+        destination,
+        priority,
+        status: missingLabels ? "pendiente_archivos" : "importado",
+        labelingStatus: missingLabels ? "bloqueado" : "pendiente",
+        approvalStatus: "pendiente",
+        dispatchDate,
+        createdAt: new Date().toISOString(),
+        archived: false,
+        progress: 0,
+        columns: uniqueColumns([], importedColumns, importedLines),
+        lines: importedLines,
+        files: [],
+        history: [
+          buildEvent(
+            "excel sync",
+            `Pedido creado desde ${sourceName} / ${sheet.sheetName} con ${importedLines.length} linea(s).`,
+            user.name
+          )
+        ]
+      });
+
+      const reusableFiles = findReusableFiles(newOrder, readOrdersFromDatabase(database));
+      const nextOrder = normalizeOrder({
+        ...newOrder,
+        files: reusableFiles,
+        history: [
+          ...(reusableFiles.length ? [buildEvent("recursos", `${reusableFiles.length} archivo(s) existentes ligados por SKU.`, user.name)] : []),
+          ...newOrder.history
+        ]
+      });
+
+      saveOrder(nextOrder);
+      ordersByCode.set(normalizeImportKey(orderCode), nextOrder);
+      summary.push({
+        sheetName: sheet.sheetName,
+        orderCode,
+        status: "created",
+        rows: usableRows.length,
+        createdLines,
+        updatedLines,
+        keptMissingLines,
+        removedLines
+      });
+    }
+
+  });
+
+  return { orders, summary };
 }
 
 async function withWrite(mutator: () => Promise<void> | void) {

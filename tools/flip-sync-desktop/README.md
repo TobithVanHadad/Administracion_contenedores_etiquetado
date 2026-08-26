@@ -9,6 +9,8 @@ App Windows para sincronizar carpetas locales de etiquetas con Flip. Es el puent
 - Guarda esa carpeta en Flip.
 - Escanea `.nlbl`, `.btw`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` y `.pdf`.
 - Sube los archivos por lotes y Flip los relaciona por SKU.
+- Sincroniza el Excel maestro de pedidos `Contenedores Orvel Europa.xlsx`.
+- Ignora por default las pestanas `MASTER`, `BODEGA`, `DV` y `CAT`.
 - Puede sincronizar un pedido, todos los pedidos con carpeta o repetir cada X minutos.
 - Usa los usuarios operativos de Flip: Gloria, Cala, Cristobal, compras y almacen.
 
@@ -63,6 +65,34 @@ Si IT bloquea ejecutables desconocidos, usa la opcion portable `.cmd`.
 5. Presiona `Seleccionar carpeta`.
 6. Presiona `Guardar carpeta en Flip`.
 7. Presiona `Sincronizar seleccionado`.
+
+## Sincronizar Excel maestro
+
+1. En `Excel maestro de pedidos`, selecciona:
+
+```text
+C:\Users\GERARDOGONZALEZ\Desktop\OneDrive - Crevel Europe GmbH\Operations Mexico\Operations Mexico\Contenedores Orvel Europa.xlsx
+```
+
+2. Revisa `Valores para pedidos nuevos`.
+3. Presiona `Sincronizar Excel`.
+4. Para que sea automatico, deja marcado `Auto Excel` y presiona `Iniciar auto`.
+
+Cuando `Auto Excel` esta activo, la app revisa si cambio el archivo. Si no cambio, no vuelve a importar.
+
+La sincronizacion del Excel:
+
+- Crea pedidos nuevos usando el nombre de la pestana.
+- Actualiza pedidos existentes por nombre/codigo de pedido.
+- Conserva notas, archivos, historial, estatus manuales, impresiones y carpeta de etiquetas.
+- Agrega SKUs nuevos.
+- Conserva lineas que ya no esten en Excel, salvo que marques `Quitar lineas ausentes del Excel`.
+
+## Cuando instalarla en otras computadoras
+
+No es obligatorio instalarla en todas las computadoras. Si tu computadora ve el Excel y las carpetas compartidas de OneDrive, tu computadora puede ser el puente principal y los demas entran solo a Flip web.
+
+Instalala en otra computadora solo si esa persona tiene carpetas locales que tu computadora no puede ver o si quieres que esa computadora tambien haga sincronizacion automatica.
 
 La configuracion se guarda en:
 

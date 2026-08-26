@@ -20,6 +20,16 @@ function New-DefaultConfig {
     pin = ""
     overwriteExisting = $false
     intervalMinutes = 30
+    excelPath = Join-Path $env:USERPROFILE "Desktop\OneDrive - Crevel Europe GmbH\Operations Mexico\Operations Mexico\Contenedores Orvel Europa.xlsx"
+    syncExcelEnabled = $true
+    defaultCustomer = "CREVEL"
+    defaultOwner = "Operaciones MX"
+    defaultDestination = "mexico"
+    defaultPriority = "media"
+    defaultDispatchDate = (Get-Date -Format "yyyy-MM-dd")
+    excludedSheets = "MASTER,BODEGA,DV,CAT"
+    removeMissingLines = $false
+    lastExcelFingerprint = ""
     orderFolders = [PSCustomObject]@{}
   }
 }
@@ -34,6 +44,34 @@ function Load-Config {
   }
 
   return New-DefaultConfig
+}
+
+function Get-ConfigText {
+  param(
+    [string]$Name,
+    [string]$Fallback = ""
+  )
+
+  $property = $script:Config.PSObject.Properties[$Name]
+  if ($property -and $null -ne $property.Value -and [string]$property.Value) {
+    return [string]$property.Value
+  }
+
+  return $Fallback
+}
+
+function Get-ConfigBool {
+  param(
+    [string]$Name,
+    [bool]$Fallback = $false
+  )
+
+  $property = $script:Config.PSObject.Properties[$Name]
+  if ($property -and $null -ne $property.Value) {
+    return [bool]$property.Value
+  }
+
+  return $Fallback
 }
 
 function Get-ConfigFolder {
@@ -62,11 +100,22 @@ function Save-ConfigFromUi {
     pin = $txtPin.Text
     overwriteExisting = [bool]$chkOverwrite.Checked
     intervalMinutes = [int]$numInterval.Value
+    excelPath = $txtExcelPath.Text.Trim()
+    syncExcelEnabled = [bool]$chkAutoExcel.Checked
+    defaultCustomer = $txtDefaultCustomer.Text.Trim()
+    defaultOwner = $txtDefaultOwner.Text.Trim()
+    defaultDestination = $cmbDefaultDestination.Text.Trim()
+    defaultPriority = $cmbDefaultPriority.Text.Trim()
+    defaultDispatchDate = $txtDefaultDispatch.Text.Trim()
+    excludedSheets = $txtExcludedSheets.Text.Trim()
+    removeMissingLines = [bool]$chkRemoveMissing.Checked
+    lastExcelFingerprint = [string]$script:LastExcelFingerprint
     orderFolders = $folders
   }
 
   $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $script:ConfigPath -Encoding UTF8
   $script:Config = Load-Config
+  $script:LastExcelFingerprint = Get-ConfigText -Name "lastExcelFingerprint"
   Write-Log "Configuracion guardada en $script:ConfigPath"
 }
 
@@ -295,6 +344,88 @@ function Upload-Batch {
   }
 }
 
+function Get-ExcelFingerprint {
+  param([string]$ExcelPath)
+
+  if (-not $ExcelPath -or -not (Test-Path -LiteralPath $ExcelPath -PathType Leaf)) {
+    return ""
+  }
+
+  $info = Get-Item -LiteralPath $ExcelPath
+  return "{0}|{1}|{2}" -f $info.FullName, $info.Length, $info.LastWriteTimeUtc.Ticks
+}
+
+function Sync-ExcelWorkbook {
+  param([bool]$OnlyIfChanged = $false)
+
+  $excelPath = $txtExcelPath.Text.Trim()
+  if (-not $excelPath) {
+    Write-Log "Selecciona el Excel maestro antes de sincronizar pedidos."
+    return
+  }
+
+  if (-not (Test-Path -LiteralPath $excelPath -PathType Leaf)) {
+    Write-Log "No encontre el Excel maestro: $excelPath"
+    return
+  }
+
+  $fingerprint = Get-ExcelFingerprint -ExcelPath $excelPath
+  if ($OnlyIfChanged -and $fingerprint -and $fingerprint -eq $script:LastExcelFingerprint) {
+    Write-Log "Excel maestro sin cambios; no se sincronizo."
+    return
+  }
+
+  $client = New-Object System.Net.Http.HttpClient
+  $form = New-Object System.Net.Http.MultipartFormDataContent
+  $stream = $null
+
+  try {
+    Write-Log "Sincronizando pedidos desde Excel maestro..."
+    $form.Add((New-Object System.Net.Http.StringContent($txtUser.Text.Trim())), "user")
+    $form.Add((New-Object System.Net.Http.StringContent($txtPin.Text)), "pin")
+    $form.Add((New-Object System.Net.Http.StringContent($txtDefaultCustomer.Text.Trim())), "defaultCustomer")
+    $form.Add((New-Object System.Net.Http.StringContent($txtDefaultOwner.Text.Trim())), "defaultOwner")
+    $form.Add((New-Object System.Net.Http.StringContent($cmbDefaultDestination.Text.Trim())), "defaultDestination")
+    $form.Add((New-Object System.Net.Http.StringContent($cmbDefaultPriority.Text.Trim())), "defaultPriority")
+    $form.Add((New-Object System.Net.Http.StringContent($txtDefaultDispatch.Text.Trim())), "defaultDispatchDate")
+    $form.Add((New-Object System.Net.Http.StringContent($txtExcludedSheets.Text.Trim())), "excludedSheets")
+    $form.Add((New-Object System.Net.Http.StringContent($(if ($chkRemoveMissing.Checked) { "1" } else { "0" }))), "removeMissingLines")
+
+    $stream = [System.IO.File]::Open($excelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $content = New-Object System.Net.Http.StreamContent($stream)
+    $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    $form.Add($content, "file", [System.IO.Path]::GetFileName($excelPath))
+
+    $response = $client.PostAsync((Base-Url) + "/api/import/sync", $form).GetAwaiter().GetResult()
+    $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    $data = $body | ConvertFrom-Json
+
+    if (-not $response.IsSuccessStatusCode) {
+      if ($data.error) { throw [string]$data.error }
+      throw "HTTP $([int]$response.StatusCode): $body"
+    }
+
+    $script:LastExcelFingerprint = $fingerprint
+    $created = @($data.summary | Where-Object { $_.status -eq "created" }).Count
+    $updated = @($data.summary | Where-Object { $_.status -eq "updated" }).Count
+    $skipped = @($data.summary | Where-Object { $_.status -eq "skipped" }).Count
+    Write-Log "Excel sincronizado: $created creado(s), $updated actualizado(s), $skipped omitido(s)."
+
+    if ($data.skippedSheets) {
+      Write-Log "Pestanas ignoradas: $([string]::Join(', ', @($data.skippedSheets)))"
+    }
+
+    Save-ConfigFromUi
+    Load-Orders
+  } catch {
+    Write-Log "Error sincronizando Excel: $($_.Exception.Message)"
+  } finally {
+    if ($stream) { $stream.Dispose() }
+    $form.Dispose()
+    $client.Dispose()
+  }
+}
+
 function Sync-Row {
   param([System.Windows.Forms.DataGridViewRow]$Row)
 
@@ -364,16 +495,17 @@ function Sync-All {
 }
 
 $script:Config = Load-Config
+$script:LastExcelFingerprint = Get-ConfigText -Name "lastExcelFingerprint"
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Flip Sync Desktop"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(1060, 740)
-$form.MinimumSize = New-Object System.Drawing.Size(960, 650)
+$form.Size = New-Object System.Drawing.Size(1180, 820)
+$form.MinimumSize = New-Object System.Drawing.Size(1080, 720)
 
 $top = New-Object System.Windows.Forms.Panel
 $top.Dock = "Top"
-$top.Height = 118
+$top.Height = 226
 $top.Padding = New-Object System.Windows.Forms.Padding(12)
 $form.Controls.Add($top)
 
@@ -385,18 +517,18 @@ $top.Controls.Add($lblServer)
 
 $txtServer = New-Object System.Windows.Forms.TextBox
 $txtServer.Location = New-Object System.Drawing.Point(12, 34)
-$txtServer.Size = New-Object System.Drawing.Size(470, 24)
+$txtServer.Size = New-Object System.Drawing.Size(530, 24)
 $txtServer.Text = [string]$script:Config.serverUrl
 $top.Controls.Add($txtServer)
 
 $lblUser = New-Object System.Windows.Forms.Label
 $lblUser.Text = "Usuario"
-$lblUser.Location = New-Object System.Drawing.Point(496, 12)
+$lblUser.Location = New-Object System.Drawing.Point(556, 12)
 $lblUser.Size = New-Object System.Drawing.Size(80, 20)
 $top.Controls.Add($lblUser)
 
 $txtUser = New-Object System.Windows.Forms.ComboBox
-$txtUser.Location = New-Object System.Drawing.Point(496, 34)
+$txtUser.Location = New-Object System.Drawing.Point(556, 34)
 $txtUser.Size = New-Object System.Drawing.Size(120, 24)
 $txtUser.DropDownStyle = "DropDownList"
 [void]$txtUser.Items.AddRange([object[]]$script:Users)
@@ -407,12 +539,12 @@ $top.Controls.Add($txtUser)
 
 $lblPin = New-Object System.Windows.Forms.Label
 $lblPin.Text = "PIN"
-$lblPin.Location = New-Object System.Drawing.Point(630, 12)
+$lblPin.Location = New-Object System.Drawing.Point(690, 12)
 $lblPin.Size = New-Object System.Drawing.Size(70, 20)
 $top.Controls.Add($lblPin)
 
 $txtPin = New-Object System.Windows.Forms.TextBox
-$txtPin.Location = New-Object System.Drawing.Point(630, 34)
+$txtPin.Location = New-Object System.Drawing.Point(690, 34)
 $txtPin.Size = New-Object System.Drawing.Size(90, 24)
 $txtPin.UseSystemPasswordChar = $true
 $txtPin.Text = [string]$script:Config.pin
@@ -420,7 +552,7 @@ $top.Controls.Add($txtPin)
 
 $btnLoad = New-Object System.Windows.Forms.Button
 $btnLoad.Text = "Cargar pedidos"
-$btnLoad.Location = New-Object System.Drawing.Point(735, 31)
+$btnLoad.Location = New-Object System.Drawing.Point(795, 31)
 $btnLoad.Size = New-Object System.Drawing.Size(125, 30)
 $btnLoad.Add_Click({
   try {
@@ -434,7 +566,7 @@ $top.Controls.Add($btnLoad)
 
 $btnSave = New-Object System.Windows.Forms.Button
 $btnSave.Text = "Guardar config"
-$btnSave.Location = New-Object System.Drawing.Point(872, 31)
+$btnSave.Location = New-Object System.Drawing.Point(932, 31)
 $btnSave.Size = New-Object System.Drawing.Size(125, 30)
 $btnSave.Add_Click({ Save-ConfigFromUi })
 $top.Controls.Add($btnSave)
@@ -467,6 +599,7 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = [int]$numInterval.Value * 60 * 1000
 $timer.Add_Tick({
   Write-Log "Sincronizacion automatica iniciada."
+  if ($chkAutoExcel.Checked) { Sync-ExcelWorkbook -OnlyIfChanged $true }
   Sync-All
 })
 
@@ -535,6 +668,113 @@ $btnSync.Location = New-Object System.Drawing.Point(870, 72)
 $btnSync.Size = New-Object System.Drawing.Size(165, 30)
 $btnSync.Add_Click({ Sync-Selected })
 $top.Controls.Add($btnSync)
+
+$lblExcel = New-Object System.Windows.Forms.Label
+$lblExcel.Text = "Excel maestro de pedidos"
+$lblExcel.Location = New-Object System.Drawing.Point(12, 116)
+$lblExcel.Size = New-Object System.Drawing.Size(180, 20)
+$top.Controls.Add($lblExcel)
+
+$txtExcelPath = New-Object System.Windows.Forms.TextBox
+$txtExcelPath.Location = New-Object System.Drawing.Point(12, 138)
+$txtExcelPath.Size = New-Object System.Drawing.Size(655, 24)
+$txtExcelPath.Text = Get-ConfigText -Name "excelPath"
+$top.Controls.Add($txtExcelPath)
+
+$btnBrowseExcel = New-Object System.Windows.Forms.Button
+$btnBrowseExcel.Text = "Elegir Excel"
+$btnBrowseExcel.Location = New-Object System.Drawing.Point(680, 135)
+$btnBrowseExcel.Size = New-Object System.Drawing.Size(105, 30)
+$btnBrowseExcel.Add_Click({
+  $dialog = New-Object System.Windows.Forms.OpenFileDialog
+  $dialog.Title = "Selecciona Contenedores Orvel Europa.xlsx"
+  $dialog.Filter = "Excel (*.xlsx)|*.xlsx"
+  $current = $txtExcelPath.Text.Trim()
+  if ($current -and (Test-Path -LiteralPath $current -PathType Leaf)) {
+    $dialog.InitialDirectory = Split-Path -Parent $current
+    $dialog.FileName = Split-Path -Leaf $current
+  }
+  if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $txtExcelPath.Text = $dialog.FileName
+    $script:LastExcelFingerprint = ""
+    Save-ConfigFromUi
+  }
+})
+$top.Controls.Add($btnBrowseExcel)
+
+$btnSyncExcel = New-Object System.Windows.Forms.Button
+$btnSyncExcel.Text = "Sincronizar Excel"
+$btnSyncExcel.Location = New-Object System.Drawing.Point(798, 135)
+$btnSyncExcel.Size = New-Object System.Drawing.Size(135, 30)
+$btnSyncExcel.Add_Click({
+  Save-ConfigFromUi
+  Sync-ExcelWorkbook
+})
+$top.Controls.Add($btnSyncExcel)
+
+$chkAutoExcel = New-Object System.Windows.Forms.CheckBox
+$chkAutoExcel.Text = "Auto Excel"
+$chkAutoExcel.Location = New-Object System.Drawing.Point(946, 139)
+$chkAutoExcel.Size = New-Object System.Drawing.Size(95, 24)
+$chkAutoExcel.Checked = Get-ConfigBool -Name "syncExcelEnabled" -Fallback $true
+$top.Controls.Add($chkAutoExcel)
+
+$lblDefaults = New-Object System.Windows.Forms.Label
+$lblDefaults.Text = "Valores para pedidos nuevos"
+$lblDefaults.Location = New-Object System.Drawing.Point(12, 172)
+$lblDefaults.Size = New-Object System.Drawing.Size(180, 20)
+$top.Controls.Add($lblDefaults)
+
+$txtDefaultCustomer = New-Object System.Windows.Forms.TextBox
+$txtDefaultCustomer.Location = New-Object System.Drawing.Point(12, 194)
+$txtDefaultCustomer.Size = New-Object System.Drawing.Size(120, 24)
+$txtDefaultCustomer.Text = Get-ConfigText -Name "defaultCustomer" -Fallback "CREVEL"
+$top.Controls.Add($txtDefaultCustomer)
+
+$txtDefaultOwner = New-Object System.Windows.Forms.TextBox
+$txtDefaultOwner.Location = New-Object System.Drawing.Point(145, 194)
+$txtDefaultOwner.Size = New-Object System.Drawing.Size(135, 24)
+$txtDefaultOwner.Text = Get-ConfigText -Name "defaultOwner" -Fallback "Operaciones MX"
+$top.Controls.Add($txtDefaultOwner)
+
+$cmbDefaultDestination = New-Object System.Windows.Forms.ComboBox
+$cmbDefaultDestination.Location = New-Object System.Drawing.Point(293, 194)
+$cmbDefaultDestination.Size = New-Object System.Drawing.Size(95, 24)
+$cmbDefaultDestination.DropDownStyle = "DropDownList"
+[void]$cmbDefaultDestination.Items.AddRange([object[]]@("mexico", "usa", "europa", "otro"))
+$savedDestination = Get-ConfigText -Name "defaultDestination" -Fallback "mexico"
+if (-not (@("mexico", "usa", "europa", "otro") -contains $savedDestination)) { $savedDestination = "mexico" }
+$cmbDefaultDestination.SelectedItem = $savedDestination
+$top.Controls.Add($cmbDefaultDestination)
+
+$cmbDefaultPriority = New-Object System.Windows.Forms.ComboBox
+$cmbDefaultPriority.Location = New-Object System.Drawing.Point(400, 194)
+$cmbDefaultPriority.Size = New-Object System.Drawing.Size(85, 24)
+$cmbDefaultPriority.DropDownStyle = "DropDownList"
+[void]$cmbDefaultPriority.Items.AddRange([object[]]@("critica", "alta", "media", "baja"))
+$savedPriority = Get-ConfigText -Name "defaultPriority" -Fallback "media"
+if (-not (@("critica", "alta", "media", "baja") -contains $savedPriority)) { $savedPriority = "media" }
+$cmbDefaultPriority.SelectedItem = $savedPriority
+$top.Controls.Add($cmbDefaultPriority)
+
+$txtDefaultDispatch = New-Object System.Windows.Forms.TextBox
+$txtDefaultDispatch.Location = New-Object System.Drawing.Point(498, 194)
+$txtDefaultDispatch.Size = New-Object System.Drawing.Size(105, 24)
+$txtDefaultDispatch.Text = Get-ConfigText -Name "defaultDispatchDate" -Fallback (Get-Date -Format "yyyy-MM-dd")
+$top.Controls.Add($txtDefaultDispatch)
+
+$txtExcludedSheets = New-Object System.Windows.Forms.TextBox
+$txtExcludedSheets.Location = New-Object System.Drawing.Point(616, 194)
+$txtExcludedSheets.Size = New-Object System.Drawing.Size(220, 24)
+$txtExcludedSheets.Text = Get-ConfigText -Name "excludedSheets" -Fallback "MASTER,BODEGA,DV,CAT"
+$top.Controls.Add($txtExcludedSheets)
+
+$chkRemoveMissing = New-Object System.Windows.Forms.CheckBox
+$chkRemoveMissing.Text = "Quitar lineas ausentes del Excel"
+$chkRemoveMissing.Location = New-Object System.Drawing.Point(850, 195)
+$chkRemoveMissing.Size = New-Object System.Drawing.Size(210, 24)
+$chkRemoveMissing.Checked = Get-ConfigBool -Name "removeMissingLines"
+$top.Controls.Add($chkRemoveMissing)
 
 $grid = New-Object System.Windows.Forms.DataGridView
 $grid.Dock = "Fill"

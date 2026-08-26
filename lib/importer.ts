@@ -2,7 +2,7 @@ import { ImportPreviewRow, Priority } from "./types";
 
 const aliases: Record<string, string[]> = {
   sku: ["sku", "code", "codigo", "código", "item", "producto"],
-  description: ["description", "descripcion", "descripción", "drescription", "producto", "nombre"],
+  description: ["description", "descripcion", "descripción", "drescription", "rescription", "producto", "nombre"],
   quantity: ["pedido", "cantidad", "qty", "cases", "cajas"],
   piecesPerCase: ["p/caja", "piezas caja", "piezas/caja", "units/displays per case"],
   labelCode: ["codigo etiqueta", "código etiqueta", "cod etiqueta", "cod etiqueta unidad"],
