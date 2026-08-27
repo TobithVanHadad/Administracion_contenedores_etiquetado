@@ -376,27 +376,39 @@ function Sync-ExcelWorkbook {
   }
 
   $client = New-Object System.Net.Http.HttpClient
-  $form = New-Object System.Net.Http.MultipartFormDataContent
+  $content = $null
   $stream = $null
 
   try {
     Write-Log "Sincronizando pedidos desde Excel maestro..."
-    $form.Add((New-Object System.Net.Http.StringContent($txtUser.Text.Trim())), "user")
-    $form.Add((New-Object System.Net.Http.StringContent($txtPin.Text)), "pin")
-    $form.Add((New-Object System.Net.Http.StringContent($txtDefaultCustomer.Text.Trim())), "defaultCustomer")
-    $form.Add((New-Object System.Net.Http.StringContent($txtDefaultOwner.Text.Trim())), "defaultOwner")
-    $form.Add((New-Object System.Net.Http.StringContent($cmbDefaultDestination.Text.Trim())), "defaultDestination")
-    $form.Add((New-Object System.Net.Http.StringContent($cmbDefaultPriority.Text.Trim())), "defaultPriority")
-    $form.Add((New-Object System.Net.Http.StringContent($txtDefaultDispatch.Text.Trim())), "defaultDispatchDate")
-    $form.Add((New-Object System.Net.Http.StringContent($txtExcludedSheets.Text.Trim())), "excludedSheets")
-    $form.Add((New-Object System.Net.Http.StringContent($(if ($chkRemoveMissing.Checked) { "1" } else { "0" }))), "removeMissingLines")
-
     $stream = [System.IO.File]::Open($excelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    $content = New-Object System.Net.Http.StreamContent($stream)
-    $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    $form.Add($content, "file", [System.IO.Path]::GetFileName($excelPath))
+    $memory = New-Object System.IO.MemoryStream
+    try {
+      $stream.CopyTo($memory)
+      $fileBase64 = [Convert]::ToBase64String($memory.ToArray())
+    } finally {
+      $memory.Dispose()
+      $stream.Dispose()
+      $stream = $null
+    }
 
-    $response = $client.PostAsync((Base-Url) + "/api/import/sync", $form).GetAwaiter().GetResult()
+    $payload = [ordered]@{
+      user = $txtUser.Text.Trim()
+      pin = $txtPin.Text
+      fileName = [System.IO.Path]::GetFileName($excelPath)
+      fileBase64 = $fileBase64
+      defaultCustomer = $txtDefaultCustomer.Text.Trim()
+      defaultOwner = $txtDefaultOwner.Text.Trim()
+      defaultDestination = $cmbDefaultDestination.Text.Trim()
+      defaultPriority = $cmbDefaultPriority.Text.Trim()
+      defaultDispatchDate = $txtDefaultDispatch.Text.Trim()
+      excludedSheets = $txtExcludedSheets.Text.Trim()
+      removeMissingLines = [bool]$chkRemoveMissing.Checked
+    }
+    $json = $payload | ConvertTo-Json -Depth 8 -Compress
+    $content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, "application/json")
+
+    $response = $client.PostAsync((Base-Url) + "/api/import/sync", $content).GetAwaiter().GetResult()
     $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
     $data = $body | ConvertFrom-Json
 
@@ -421,7 +433,7 @@ function Sync-ExcelWorkbook {
     Write-Log "Error sincronizando Excel: $($_.Exception.Message)"
   } finally {
     if ($stream) { $stream.Dispose() }
-    $form.Dispose()
+    if ($content) { $content.Dispose() }
     $client.Dispose()
   }
 }
