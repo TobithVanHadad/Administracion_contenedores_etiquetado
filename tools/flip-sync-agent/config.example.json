@@ -3,6 +3,7 @@
   "user": "Gloria",
   "pin": "1002",
   "overwriteExisting": false,
+  "skipUnchangedFiles": true,
   "orders": [
     {
       "orderCode": "EUROPA 17",

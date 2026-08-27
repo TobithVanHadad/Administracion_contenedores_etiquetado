@@ -343,6 +343,24 @@ function fileMatchesReplacement(existing: LinkedFile, incoming: LinkedFile) {
   return sameName || (sameLabelSize && sameCategory);
 }
 
+function normalizeSyncPath(value?: string) {
+  return normalizeFileKey(String(value ?? "").replace(/\\/g, "/"));
+}
+
+function sameSyncIdentity(existing: LinkedFile, incoming: LinkedFile) {
+  if (!incoming.relativePath && !incoming.localPath) return false;
+
+  const existingPath = normalizeSyncPath(existing.relativePath || existing.localPath);
+  const incomingPath = normalizeSyncPath(incoming.relativePath || incoming.localPath);
+  if (!existingPath || existingPath !== incomingPath) return false;
+
+  const existingFolder = normalizeSyncPath(existing.folderPath || existing.folderName);
+  const incomingFolder = normalizeSyncPath(incoming.folderPath || incoming.folderName);
+  if (existingFolder && incomingFolder && existingFolder !== incomingFolder) return false;
+
+  return true;
+}
+
 function can(role: UserRole, action: string, field?: keyof Order) {
   if (role === "admin") return true;
   if (role === "consulta") return false;
@@ -1242,7 +1260,7 @@ export async function addFilesToOrder(
   orderId: string,
   files: LinkedFile[],
   auth: AuthPayload,
-  options: { overwriteExisting?: boolean; replaceFileId?: string } = {}
+  options: { overwriteExisting?: boolean; replaceFileId?: string; replaceBySyncIdentity?: boolean } = {}
 ) {
   const user = await authenticate(auth, "addFiles");
   let removedFiles: LinkedFile[] = [];
@@ -1253,11 +1271,27 @@ export async function addFilesToOrder(
     if (!row) throw new Error("Pedido no encontrado.");
 
     const order = rowToOrder(row);
-    removedFiles = options.replaceFileId
-      ? order.files.filter((file) => file.id === options.replaceFileId)
-      : options.overwriteExisting
-        ? order.files.filter((file) => files.some((incoming) => fileMatchesReplacement(file, incoming)))
-        : [];
+    const removedFileIds = new Set<string>();
+
+    if (options.replaceFileId) {
+      for (const file of order.files) {
+        if (file.id === options.replaceFileId) removedFileIds.add(file.id);
+      }
+    }
+
+    if (options.replaceBySyncIdentity) {
+      for (const file of order.files) {
+        if (files.some((incoming) => sameSyncIdentity(file, incoming))) removedFileIds.add(file.id);
+      }
+    }
+
+    if (options.overwriteExisting) {
+      for (const file of order.files) {
+        if (files.some((incoming) => fileMatchesReplacement(file, incoming))) removedFileIds.add(file.id);
+      }
+    }
+
+    removedFiles = order.files.filter((file) => removedFileIds.has(file.id));
 
     const nextOrder = normalizeOrder({
       ...order,

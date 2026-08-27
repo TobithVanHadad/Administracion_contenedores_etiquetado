@@ -28,4 +28,6 @@ node tools\flip-sync-agent\sync-folder.mjs --config tools\flip-sync-agent\config
 
 - Solo procesa `.nlbl`, `.btw`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` y `.pdf`.
 - Flip descarta automaticamente archivos sin SKU coincidente en el pedido.
+- Con `skipUnchangedFiles: true`, omite archivos iguales usando ruta relativa, tamano y fecha modificada.
+- Si cambia el mismo archivo de la misma carpeta/ruta, reemplaza solo ese archivo en Flip.
 - Esta version sube/copias archivos a Flip para que todos puedan verlos. La version empaquetada como `.exe` puede agregar sincronizacion programada y asistente visual.

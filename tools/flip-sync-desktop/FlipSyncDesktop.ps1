@@ -19,9 +19,11 @@ function New-DefaultConfig {
     user = "Gloria"
     pin = ""
     overwriteExisting = $false
+    skipUnchangedFiles = $true
     intervalMinutes = 30
     excelPath = Join-Path $env:USERPROFILE "Desktop\OneDrive - Crevel Europe GmbH\Operations Mexico\Operations Mexico\Contenedores Orvel Europa.xlsx"
     syncExcelEnabled = $true
+    syncFoldersEnabled = $true
     defaultCustomer = "CREVEL"
     defaultOwner = "Operaciones MX"
     defaultDestination = "mexico"
@@ -99,9 +101,11 @@ function Save-ConfigFromUi {
     user = $txtUser.Text.Trim()
     pin = $txtPin.Text
     overwriteExisting = [bool]$chkOverwrite.Checked
+    skipUnchangedFiles = [bool]$chkSkipUnchanged.Checked
     intervalMinutes = [int]$numInterval.Value
     excelPath = $txtExcelPath.Text.Trim()
     syncExcelEnabled = [bool]$chkAutoExcel.Checked
+    syncFoldersEnabled = [bool]$chkAutoFolders.Checked
     defaultCustomer = $txtDefaultCustomer.Text.Trim()
     defaultOwner = $txtDefaultOwner.Text.Trim()
     defaultDestination = $cmbDefaultDestination.Text.Trim()
@@ -283,11 +287,95 @@ function Get-MimeType {
   }
 }
 
+function Normalize-SyncPath {
+  param([string]$Value)
+  if (-not $Value) { return "" }
+  return $Value.Trim().Replace("\", "/").ToLowerInvariant()
+}
+
+function Get-FileSyncFingerprint {
+  param(
+    [string]$FolderPath,
+    [System.IO.FileInfo]$File
+  )
+
+  $relativePath = (Get-RelativePath -FolderPath $FolderPath -FilePath $File.FullName).Replace("\", "/")
+  return "{0}|{1}|{2}" -f (Normalize-SyncPath -Value $relativePath), $File.Length, $File.LastWriteTimeUtc.Ticks
+}
+
+function Test-SameSyncIdentity {
+  param(
+    [object]$LinkedFile,
+    [string]$FolderPath,
+    [string]$RelativePath,
+    [string]$LocalPath
+  )
+
+  $existingPath = Normalize-SyncPath -Value $(if ($LinkedFile.relativePath) { [string]$LinkedFile.relativePath } else { [string]$LinkedFile.localPath })
+  $incomingPath = Normalize-SyncPath -Value $(if ($RelativePath) { $RelativePath } else { $LocalPath })
+  if (-not $existingPath -or $existingPath -ne $incomingPath) { return $false }
+
+  $existingFolder = Normalize-SyncPath -Value $(if ($LinkedFile.folderPath) { [string]$LinkedFile.folderPath } else { [string]$LinkedFile.folderName })
+  $incomingFolder = Normalize-SyncPath -Value $FolderPath
+  if ($existingFolder -and $incomingFolder -and $existingFolder -ne $incomingFolder) { return $false }
+
+  return $true
+}
+
+function Get-FilesForSync {
+  param(
+    [object]$Order,
+    [string]$FolderPath,
+    [object[]]$Files,
+    [bool]$SkipUnchanged
+  )
+
+  if (-not $SkipUnchanged) {
+    return [PSCustomObject]@{ ToUpload = @($Files); Skipped = 0 }
+  }
+
+  $toUpload = New-Object System.Collections.ArrayList
+  $skipped = 0
+  $linkedFiles = @()
+  if ($Order.files) { $linkedFiles = @($Order.files) }
+
+  foreach ($file in $Files) {
+    $relativePath = (Get-RelativePath -FolderPath $FolderPath -FilePath $file.FullName).Replace("\", "/")
+    $fingerprint = Get-FileSyncFingerprint -FolderPath $FolderPath -File $file
+    $unchanged = $false
+
+    foreach ($linkedFile in $linkedFiles) {
+      if (-not (Test-SameSyncIdentity -LinkedFile $linkedFile -FolderPath $FolderPath -RelativePath $relativePath -LocalPath $file.FullName)) {
+        continue
+      }
+
+      if ($linkedFile.syncFingerprint -and [string]$linkedFile.syncFingerprint -eq $fingerprint) {
+        $unchanged = $true
+        break
+      }
+
+      if (-not $linkedFile.syncFingerprint -and $linkedFile.size -and ([int64]$linkedFile.size -eq [int64]$file.Length)) {
+        $unchanged = $true
+        break
+      }
+    }
+
+    if ($unchanged) {
+      $skipped += 1
+    } else {
+      [void]$toUpload.Add($file)
+    }
+  }
+
+  return [PSCustomObject]@{ ToUpload = @($toUpload); Skipped = $skipped }
+}
+
 function Upload-Batch {
   param(
     [object]$Order,
     [string]$FolderPath,
-    [object[]]$Batch
+    [object[]]$Batch,
+    [bool]$SkipUnchangedFiles = $true
   )
 
   $client = New-Object System.Net.Http.HttpClient
@@ -299,6 +387,8 @@ function Upload-Batch {
     $form.Add((New-Object System.Net.Http.StringContent($txtUser.Text.Trim())), "user")
     $form.Add((New-Object System.Net.Http.StringContent($txtPin.Text)), "pin")
     $form.Add((New-Object System.Net.Http.StringContent($(if ($chkOverwrite.Checked) { "1" } else { "0" }))), "overwriteExisting")
+    $form.Add((New-Object System.Net.Http.StringContent("1")), "replaceBySyncIdentity")
+    $form.Add((New-Object System.Net.Http.StringContent($(if ($SkipUnchangedFiles) { "1" } else { "0" }))), "skipUnchangedFiles")
 
     $metadata = @()
     foreach ($file in $Batch) {
@@ -309,6 +399,8 @@ function Upload-Batch {
         folderName = Split-Path -Leaf $FolderPath
         relativePath = $relativePath
         localPath = $file.FullName
+        syncFingerprint = Get-FileSyncFingerprint -FolderPath $FolderPath -File $file
+        syncModifiedAt = $file.LastWriteTimeUtc.ToString("o")
       }
     }
     $form.Add((New-Object System.Net.Http.StringContent(($metadata | ConvertTo-Json -Depth 8 -Compress), [System.Text.Encoding]::UTF8, "application/json")), "fileMetadata")
@@ -458,21 +550,42 @@ function Sync-Row {
     return
   }
 
+  $syncPlan = Get-FilesForSync -Order $order -FolderPath $folder -Files $files -SkipUnchanged ([bool]$chkSkipUnchanged.Checked)
+  $filesToUpload = @($syncPlan.ToUpload)
+  $skippedLocal = [int]$syncPlan.Skipped
+  if ($skippedLocal -gt 0) {
+    Write-Log "  ${code}: $skippedLocal archivo(s) sin cambios omitidos"
+  }
+
+  if ($filesToUpload.Count -eq 0) {
+    $Row.Cells["Status"].Value = "Sin cambios: $skippedLocal omitidos"
+    return
+  }
+
   Save-FolderToFlip -Row $Row -Quiet $true
-  $batches = @(Split-Batches -Files $files)
+  $batches = @(Split-Batches -Files $filesToUpload)
   $uploaded = 0
   $rejected = 0
+  $skippedServer = 0
+  $replaced = 0
 
   for ($i = 0; $i -lt $batches.Count; $i++) {
     $Row.Cells["Status"].Value = "Subiendo lote $($i + 1)/$($batches.Count)"
     [System.Windows.Forms.Application]::DoEvents()
-    $result = Upload-Batch -Order $order -FolderPath $folder -Batch $batches[$i]
+    $result = Upload-Batch -Order $order -FolderPath $folder -Batch $batches[$i] -SkipUnchangedFiles ([bool]$chkSkipUnchanged.Checked)
     $uploaded += @($result.uploaded).Count
     $rejected += @($result.rejected).Count
-    Write-Log "  $code lote $($i + 1): $(@($result.uploaded).Count) ligados, $(@($result.rejected).Count) descartados"
+    $skippedServer += @($result.skipped).Count
+    $replaced += @($result.replaced).Count
+    if ($result.orders) {
+      $script:Orders = @($result.orders)
+      $order = Find-OrderById -OrderId $orderId
+    }
+    Write-Log "  $code lote $($i + 1): $(@($result.uploaded).Count) ligados, $(@($result.replaced).Count) reemplazados, $(@($result.skipped).Count) omitidos, $(@($result.rejected).Count) descartados"
   }
 
-  $Row.Cells["Status"].Value = "Listo: $uploaded ligados, $rejected descartados"
+  $totalSkipped = $skippedLocal + $skippedServer
+  $Row.Cells["Status"].Value = "Listo: $uploaded ligados, $replaced reemplazados, $totalSkipped omitidos, $rejected descartados"
 }
 
 function Sync-Selected {
@@ -590,6 +703,13 @@ $chkOverwrite.Size = New-Object System.Drawing.Size(220, 24)
 $chkOverwrite.Checked = [bool]$script:Config.overwriteExisting
 $top.Controls.Add($chkOverwrite)
 
+$chkSkipUnchanged = New-Object System.Windows.Forms.CheckBox
+$chkSkipUnchanged.Text = "Solo cambios"
+$chkSkipUnchanged.Location = New-Object System.Drawing.Point(1045, 76)
+$chkSkipUnchanged.Size = New-Object System.Drawing.Size(110, 24)
+$chkSkipUnchanged.Checked = Get-ConfigBool -Name "skipUnchangedFiles" -Fallback $true
+$top.Controls.Add($chkSkipUnchanged)
+
 $lblInterval = New-Object System.Windows.Forms.Label
 $lblInterval.Text = "Auto cada min."
 $lblInterval.Location = New-Object System.Drawing.Point(250, 78)
@@ -612,7 +732,7 @@ $timer.Interval = [int]$numInterval.Value * 60 * 1000
 $timer.Add_Tick({
   Write-Log "Sincronizacion automatica iniciada."
   if ($chkAutoExcel.Checked) { Sync-ExcelWorkbook -OnlyIfChanged $true }
-  Sync-All
+  if ($chkAutoFolders.Checked) { Sync-All }
 })
 
 $btnAuto = New-Object System.Windows.Forms.Button
@@ -731,6 +851,13 @@ $chkAutoExcel.Size = New-Object System.Drawing.Size(95, 24)
 $chkAutoExcel.Checked = Get-ConfigBool -Name "syncExcelEnabled" -Fallback $true
 $top.Controls.Add($chkAutoExcel)
 
+$chkAutoFolders = New-Object System.Windows.Forms.CheckBox
+$chkAutoFolders.Text = "Auto carpetas"
+$chkAutoFolders.Location = New-Object System.Drawing.Point(1045, 139)
+$chkAutoFolders.Size = New-Object System.Drawing.Size(115, 24)
+$chkAutoFolders.Checked = Get-ConfigBool -Name "syncFoldersEnabled" -Fallback $true
+$top.Controls.Add($chkAutoFolders)
+
 $lblDefaults = New-Object System.Windows.Forms.Label
 $lblDefaults.Text = "Valores para pedidos nuevos"
 $lblDefaults.Location = New-Object System.Drawing.Point(12, 172)
@@ -822,7 +949,7 @@ $bottom.Padding = New-Object System.Windows.Forms.Padding(12)
 $form.Controls.Add($bottom)
 
 $btnSyncAll = New-Object System.Windows.Forms.Button
-$btnSyncAll.Text = "Sincronizar todos con carpeta"
+$btnSyncAll.Text = "Sincronizar carpetas"
 $btnSyncAll.Location = New-Object System.Drawing.Point(12, 10)
 $btnSyncAll.Size = New-Object System.Drawing.Size(200, 30)
 $btnSyncAll.Add_Click({ Sync-All })

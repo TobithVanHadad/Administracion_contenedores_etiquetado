@@ -9,6 +9,8 @@ App Windows para sincronizar carpetas locales de etiquetas con Flip. Es el puent
 - Guarda esa carpeta en Flip.
 - Escanea `.nlbl`, `.btw`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` y `.pdf`.
 - Sube los archivos por lotes y Flip los relaciona por SKU.
+- Omite archivos sin cambios para no resubir lo mismo en cada sincronizacion.
+- Reemplaza automaticamente el archivo anterior cuando cambia el mismo archivo de la misma carpeta/ruta.
 - Sincroniza el Excel maestro de pedidos `Contenedores Orvel Europa.xlsx`.
 - Ignora por default las pestanas `MASTER`, `BODEGA`, `DV` y `CAT`.
 - Puede sincronizar un pedido, todos los pedidos con carpeta o repetir cada X minutos.
@@ -66,6 +68,8 @@ Si IT bloquea ejecutables desconocidos, usa la opcion portable `.cmd`.
 6. Presiona `Guardar carpeta en Flip`.
 7. Presiona `Sincronizar seleccionado`.
 
+Deja marcado `Solo cambios` para que la app compare ruta, tamano y fecha modificada antes de subir. Si un archivo no cambio, lo omite. Si cambio el mismo archivo, lo sube y reemplaza el anterior de esa misma ruta.
+
 ## Sincronizar Excel maestro
 
 1. En `Excel maestro de pedidos`, selecciona:
@@ -79,6 +83,8 @@ C:\Users\GERARDOGONZALEZ\Desktop\OneDrive - Crevel Europe GmbH\Operations Mexico
 4. Para que sea automatico, deja marcado `Auto Excel` y presiona `Iniciar auto`.
 
 Cuando `Auto Excel` esta activo, la app revisa si cambio el archivo. Si no cambio, no vuelve a importar.
+
+Cuando `Auto carpetas` esta activo, la app revisa los pedidos con carpeta asignada. Con `Solo cambios` activo, no vuelve a subir archivos iguales.
 
 La sincronizacion del Excel:
 

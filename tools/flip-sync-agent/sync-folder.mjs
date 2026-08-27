@@ -54,13 +54,60 @@ async function scanFolder(folderPath) {
       entries.push({
         fullPath: childPath,
         relativePath: path.relative(folderPath, childPath).replace(/\\/g, "/"),
-        size: info.size
+        size: info.size,
+        modifiedAt: info.mtime.toISOString(),
+        modifiedTicks: Math.trunc(info.mtimeMs)
       });
     }
   }
 
   await walk(folderPath);
   return entries.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+function normalizeSyncPath(value) {
+  return String(value ?? "").trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function syncFingerprint(file) {
+  return `${normalizeSyncPath(file.relativePath)}|${file.size}|${file.modifiedTicks}`;
+}
+
+function sameSyncIdentity(existing, folderPath, file) {
+  const existingPath = normalizeSyncPath(existing.relativePath || existing.localPath);
+  const incomingPath = normalizeSyncPath(file.relativePath || file.fullPath);
+  if (!existingPath || existingPath !== incomingPath) return false;
+
+  const existingFolder = normalizeSyncPath(existing.folderPath || existing.folderName);
+  const incomingFolder = normalizeSyncPath(folderPath);
+  if (existingFolder && incomingFolder && existingFolder !== incomingFolder) return false;
+
+  return true;
+}
+
+function filterFilesForSync(order, folderPath, files, skipUnchangedFiles) {
+  if (!skipUnchangedFiles) return { filesToUpload: files, skipped: 0 };
+
+  const linkedFiles = Array.isArray(order.files) ? order.files : [];
+  const filesToUpload = [];
+  let skipped = 0;
+
+  for (const file of files) {
+    const fingerprint = syncFingerprint(file);
+    const unchanged = linkedFiles.some((linkedFile) => {
+      if (!sameSyncIdentity(linkedFile, folderPath, file)) return false;
+      if (linkedFile.syncFingerprint) return linkedFile.syncFingerprint === fingerprint;
+      return Number(linkedFile.size || 0) === Number(file.size || 0);
+    });
+
+    if (unchanged) {
+      skipped += 1;
+    } else {
+      filesToUpload.push(file);
+    }
+  }
+
+  return { filesToUpload, skipped };
 }
 
 function buildBatches(files) {
@@ -123,6 +170,8 @@ async function uploadBatch({ serverUrl, user, pin, order, folderPath, batch, ove
   formData.append("user", user);
   formData.append("pin", pin);
   formData.append("overwriteExisting", overwriteExisting ? "1" : "0");
+  formData.append("replaceBySyncIdentity", "1");
+  formData.append("skipUnchangedFiles", "1");
   formData.append(
     "fileMetadata",
     JSON.stringify(
@@ -131,7 +180,9 @@ async function uploadBatch({ serverUrl, user, pin, order, folderPath, batch, ove
         folderPath,
         folderName: path.basename(folderPath),
         relativePath: file.relativePath,
-        localPath: file.fullPath
+        localPath: file.fullPath,
+        syncFingerprint: syncFingerprint(file),
+        syncModifiedAt: file.modifiedAt
       }))
     )
   );
@@ -164,8 +215,10 @@ async function main() {
 
   const cloudOrders = await fetchOrders(serverUrl);
   const jobs = resolveJobs(config, cloudOrders, useServerFolders);
+  const skipUnchangedFiles = config.skipUnchangedFiles !== false;
   let uploaded = 0;
   let rejected = 0;
+  let skipped = 0;
 
   for (const job of jobs) {
     if (!job.order) {
@@ -187,7 +240,12 @@ async function main() {
 
     if (dryRun || files.length === 0) continue;
 
-    const batches = buildBatches(files);
+    const syncPlan = filterFilesForSync(job.order, folderPath, files, skipUnchangedFiles);
+    skipped += syncPlan.skipped;
+    if (syncPlan.skipped) console.log(`  ${syncPlan.skipped} archivo(s) sin cambios omitidos`);
+    if (syncPlan.filesToUpload.length === 0) continue;
+
+    const batches = buildBatches(syncPlan.filesToUpload);
     for (let index = 0; index < batches.length; index += 1) {
       const data = await uploadBatch({
         serverUrl,
@@ -200,11 +258,16 @@ async function main() {
       });
       uploaded += data.uploaded?.length ?? 0;
       rejected += data.rejected?.length ?? 0;
-      console.log(`  lote ${index + 1}/${batches.length}: ${data.uploaded?.length ?? 0} ligados, ${data.rejected?.length ?? 0} descartados`);
+      skipped += data.skipped?.length ?? 0;
+      if (Array.isArray(data.orders)) {
+        const updatedOrder = data.orders.find((order) => order.id === job.order.id);
+        if (updatedOrder) job.order = updatedOrder;
+      }
+      console.log(`  lote ${index + 1}/${batches.length}: ${data.uploaded?.length ?? 0} ligados, ${data.skipped?.length ?? 0} omitidos, ${data.rejected?.length ?? 0} descartados`);
     }
   }
 
-  console.log(`Listo. Ligados: ${uploaded}. Descartados: ${rejected}.`);
+  console.log(`Listo. Ligados: ${uploaded}. Omitidos: ${skipped}. Descartados: ${rejected}.`);
 }
 
 main().catch((error) => {

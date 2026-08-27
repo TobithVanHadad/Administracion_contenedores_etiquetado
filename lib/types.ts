@@ -123,6 +123,8 @@ export type LinkedFile = {
   folderName?: string;
   relativePath?: string;
   localPath?: string;
+  syncFingerprint?: string;
+  syncModifiedAt?: string;
   addedAt?: string;
   updatedAt?: string;
   preservedAt?: string;

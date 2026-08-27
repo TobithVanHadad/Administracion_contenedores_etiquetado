@@ -99,6 +99,24 @@ function detectLabelCategory(filename: string, extension: string) {
   return "General";
 }
 
+function normalizeSyncPath(value?: string) {
+  return cleanText(value).replace(/\\/g, "/").toLowerCase().replace(/\s+/g, " ");
+}
+
+function sameSyncIdentity(existing: LinkedFile, incoming: Partial<LinkedFile>) {
+  if (!incoming.relativePath && !incoming.localPath) return false;
+
+  const existingPath = normalizeSyncPath(existing.relativePath || existing.localPath);
+  const incomingPath = normalizeSyncPath(incoming.relativePath || incoming.localPath);
+  if (!existingPath || existingPath !== incomingPath) return false;
+
+  const existingFolder = normalizeSyncPath(existing.folderPath || existing.folderName);
+  const incomingFolder = normalizeSyncPath(incoming.folderPath || incoming.folderName);
+  if (existingFolder && incomingFolder && existingFolder !== incomingFolder) return false;
+
+  return true;
+}
+
 export async function GET(request: NextRequest) {
   const fileId = request.nextUrl.searchParams.get("fileId");
   if (!fileId) return NextResponse.json({ error: "Falta fileId." }, { status: 400 });
@@ -131,6 +149,8 @@ export async function POST(request: NextRequest) {
     const user = String(formData.get("user") || "");
     const pin = String(formData.get("pin") || "");
     const overwriteExisting = String(formData.get("overwriteExisting") || "") === "1";
+    const replaceBySyncIdentity = String(formData.get("replaceBySyncIdentity") || "") === "1";
+    const skipUnchangedFiles = String(formData.get("skipUnchangedFiles") || "") === "1";
     const replaceFileId = String(formData.get("replaceFileId") || "");
     const uploadedFiles = formData.getAll("files").filter((file): file is File => file instanceof File);
     const metadataList = parseFileMetadata(formData);
@@ -145,6 +165,7 @@ export async function POST(request: NextRequest) {
     const skus = order.lines.map((line) => line.sku);
     const linkedFiles: LinkedFile[] = [];
     const rejectedFiles: Array<{ name: string; reason: string }> = [];
+    const skippedFiles: Array<{ name: string; reason: string }> = [];
 
     for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
       const file = uploadedFiles[fileIndex];
@@ -175,9 +196,32 @@ export async function POST(request: NextRequest) {
       const originalName = cleanText(metadata.originalName) || file.name;
       const fileType = metadataFileType(metadata.type) ?? fileTypeFromExtension(extension);
       const syncSource = metadataSyncSource(metadata.syncSource);
+      const syncFingerprint = cleanText(metadata.syncFingerprint);
+      const syncModifiedAt = cleanText(metadata.syncModifiedAt);
 
       if (!detectedSku || !line) {
         rejectedFiles.push({ name: file.name, reason: "Sin coincidencia de SKU en el pedido." });
+        continue;
+      }
+
+      const incomingSyncIdentity: Partial<LinkedFile> = {
+        folderPath: folderPath || undefined,
+        folderName: folderName || undefined,
+        relativePath: relativePath || undefined,
+        localPath: localPath || undefined
+      };
+
+      const unchangedFile = skipUnchangedFiles
+        ? order.files.find(
+            (existing) =>
+              sameSyncIdentity(existing, incomingSyncIdentity) &&
+              Boolean(syncFingerprint) &&
+              existing.syncFingerprint === syncFingerprint
+          )
+        : undefined;
+
+      if (unchangedFile) {
+        skippedFiles.push({ name: file.name, reason: "Sin cambios desde la ultima sincronizacion." });
         continue;
       }
 
@@ -208,22 +252,24 @@ export async function POST(request: NextRequest) {
         folderPath: folderPath || undefined,
         folderName: folderName || undefined,
         relativePath: relativePath || undefined,
-        localPath: localPath || undefined
+        localPath: localPath || undefined,
+        syncFingerprint: syncFingerprint || undefined,
+        syncModifiedAt: syncModifiedAt || undefined
       });
     }
 
     if (linkedFiles.length === 0) {
-      return NextResponse.json({ orders, uploaded: [], rejected: rejectedFiles });
+      return NextResponse.json({ orders, uploaded: [], rejected: rejectedFiles, skipped: skippedFiles });
     }
 
-    const { orders: updatedOrders, removedFiles } = await addFilesToOrder(orderId, linkedFiles, { user, pin }, { overwriteExisting, replaceFileId });
+    const { orders: updatedOrders, removedFiles } = await addFilesToOrder(orderId, linkedFiles, { user, pin }, { overwriteExisting, replaceFileId, replaceBySyncIdentity });
     for (const removedFile of removedFiles) {
       if (removedFile.storedName && (!removedFile.sourceOrderId || removedFile.sourceOrderId === orderId)) {
         await unlink(path.join(uploadDir, orderId, removedFile.storedName)).catch(() => undefined);
       }
     }
 
-    return NextResponse.json({ orders: updatedOrders, uploaded: linkedFiles, rejected: rejectedFiles, replaced: removedFiles });
+    return NextResponse.json({ orders: updatedOrders, uploaded: linkedFiles, rejected: rejectedFiles, skipped: skippedFiles, replaced: removedFiles });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "No se pudieron subir archivos." }, { status: 400 });
   }
